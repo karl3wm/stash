@@ -1,5 +1,3 @@
-import array_api_strict as xp
-
 def ceil_exp_2(data):
     data = xp.asarray(data)
     if len(data.shape) == 0:
@@ -14,8 +12,7 @@ def ceil_exp_2(data):
 
 class NDArray:
     def __init__(self, data):
-        self._xp = data.__array_namespace__()
-        assert self._xp is xp
+        xp = self.xp = data.__array_namespace__()
         self.ndim = len(data.shape)
         self.dtype_index = xp.__array_namespace_info__().default_dtypes(device=data.device)['indexing']
         self.capacity, self.shape = xp.unstack(xp.zeros([2, self.ndim], dtype=self.dtype_index))
@@ -34,6 +31,7 @@ class NDArray:
         return str(self.data)
 
     def _reserve(self, shape):
+        xp = self.xp
         capacity = xp.max(xp.stack([self.capacity, shape]), axis=0)
         if xp.any(capacity != self.capacity):
             capacity = ceil_exp_2(capacity)
@@ -43,6 +41,7 @@ class NDArray:
             return [self.storage, self.capacity]
 
     def resize(self, shape):
+        xp = self.xp
         shape = xp.asarray(shape)
         storage, capacity = self._reserve(shape)
         if storage is not self.storage:
@@ -55,6 +54,7 @@ class NDArray:
         self.data = storage[*[slice(0,x) for x in shape]]
 
     def insert_empty(self, where, expansion):
+        xp = self.xp
         # resizes the ndlist to prepare for insertion of data, leaving empty regions.
         # the unassigned regions form an n-dimensional "+" shape extending in
         # every axis, with the center volume of the "+" located at 'where' with
@@ -77,7 +77,7 @@ class NDArray:
         axes_expanding_idcs = xp.nonzero(axes_expanding_mask)[0]
         nexpanding = axes_expanding_idcs.shape[0]
         move_region_idcs = xp.reshape(
-            xp.stack(xp.meshgrid(*([xp.arange(2)]*nexpanding))), # np.indices
+            xp.stack(xp.meshgrid(*([xp.arange(2)]*nexpanding),indexing='ij')), # np.indices
             [nexpanding, -1]
         ).T
         slicelist_src_data = [ slice(None, old_shape[idx]) for idx in range(self.ndim) ]
@@ -133,6 +133,7 @@ class NDArray:
         return [self.Subview(self, bounds, *slices) for bounds, slices in empty_views]
         
     def insert(self, axis, offset, data):
+        xp = self.xp
         # expands along only one dimension
         where, expansion = xp.unstack(xp.zeros([2,self.ndim],dtype=self.dtype_index))
         where[axis] = offset
@@ -167,6 +168,8 @@ class NDArray:
             return str(self.data)
 
 if __name__ == '__main__':
+    import array_api_strict as xp
+
     ndlist1 = NDArray(xp.asarray([1,2,3]))
     assert xp.all(ndlist1.data == xp.asarray([1,2,3]))
     ndlist1.insert(0, 2, xp.asarray([4,5]))
@@ -180,6 +183,7 @@ if __name__ == '__main__':
     assert xp.all(ndlist2.data == xp.asarray([[1,9,10,2],[5,11,12,6],[7,13,14,8],[3,15,16,4]]))
 
     ndlist3 = NDArray(xp.asarray([[[1,2],[3,4]],[[5,6],[7,8]]]))
-    for hole in ndlist3.insert_empty([1,1,1],[1,1,1]):
-        hole[:,...] = 9
-    assert xp.all(ndlist3.data == xp.asarray([[[1,9,2],[9]*3,[3,9,4]],[[9]*3]*3,[[5,9,6],[9]*3,[7,9,8]]]))
+    gaps = ndlist3.insert_empty([1,1,1],[1,1,1])
+    for hole in gaps:
+        hole[:,...] = sum(xp.meshgrid(xp.arange(3),xp.arange(3),xp.arange(3)))[tuple(slice(bound[0],bound[1]) for bound in xp.unstack(hole.bounds.T))]
+    assert xp.all(ndlist3.data == xp.asarray([[[1,1,2],[1,2,3],[3,3,4]],[[1,2,3],[2,3,4],[3,4,5]],[[5,3,6],[3,4,5],[7,5,8]]]))
