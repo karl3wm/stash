@@ -23,14 +23,16 @@ class NDArray:
         self.data = self.storage
         self.resize(data.shape)
         self.data[:,...] = data
+
     def __getitem__(self, idcs):
         return self.data[idcs]
     def __setitem__(self, idcs, data):
         self.data[idcs] = data
     def __repr__(self):
-        return 'NDArray('+repr(self.data)+')'
+        return 'NDArray('+repr(self.data).replace('\n','\n        ')+')'
     def __str__(self):
         return str(self.data)
+
     def _reserve(self, shape):
         capacity = xp.max(xp.stack([self.capacity, shape]), axis=0)
         if xp.any(capacity != self.capacity):
@@ -39,6 +41,7 @@ class NDArray:
             return [storage, capacity]
         else:
             return [self.storage, self.capacity]
+
     def resize(self, shape):
         shape = xp.asarray(shape)
         storage, capacity = self._reserve(shape)
@@ -50,13 +53,14 @@ class NDArray:
             self.capacity = capacity
         self.shape = shape
         self.data = storage[*[slice(0,x) for x in shape]]
-    def _insert_empty(self, where, expansion):
+
+    def insert_empty(self, where, expansion):
         # resizes the ndlist to prepare for insertion of data, leaving empty regions.
         # the unassigned regions form an n-dimensional "+" shape extending in
         # every axis, with the center volume of the "+" located at 'where' with
         # size 'expansion'.
-        # returns a list of views over the newly-created unallocated volumes, to place data into.
-        # the views are returned in axis order with the center of the "+" returned last.
+        # returns a list of nonoverlapping views over the newly-created unallocated volumes, to place data into.
+        # each view has attributes .data and .bounds and supports indexing
 
         # note: this could support ragged nd data with an additional parameter specifying which axes to shift old data
 
@@ -97,9 +101,6 @@ class NDArray:
             bounds_empty[1,:] = new_shape
             ray_dimensions = False
 
-            # if an element of move_region_idx is 1 (or 0)
-            # then all following (or preceding) elements of the empty view wou
-
             # elements of move_region_idx are 1 for axes needing expansion
             for idx in range(nexpanding):
                 axis = int(axes_expanding_idcs[idx])
@@ -139,7 +140,7 @@ class NDArray:
         insertion_shape = xp.asarray(self.shape, copy=True)
         insertion_shape[axis] = data.shape[axis]
         assert xp.all(xp.asarray(data.shape) == insertion_shape)
-        hole, = self._insert_empty(where, expansion)
+        hole, = self.insert_empty(where, expansion)
         assert xp.all(hole.bounds[0,:] == where)
         assert hole.bounds[1,axis] - hole.bounds[0,axis] == expansion[axis]
         assert xp.all(hole.bounds[1,:axis] - hole.bounds[0,:axis] == self.shape[:axis])
@@ -157,170 +158,13 @@ class NDArray:
             self.data[slices] = vals
         def __getattr__(self, attr):
             return getattr(self.data, attr)
-
-#
-# 0 1  4 5
-# 2 3  6 7
-#
-# 0 - 1  - - -  4 - 5
-# - - -  - - -  - - -
-# 2 - 3  - - -  6 - 7
-#
-# 7 moved volumes
-# 3 inserted planes
-# 8 inserted volumes between moves
-# 1 central inserted volume
-# 6 inserted volumes neither central nor between moves
-
-# it looks like the current implemented would first return the inserted planes, 
-# then the bars connecting them,
-# then the central volume
-#  it does this but not in that order. total: 3 2-long,1-short volumes, 3 1-long,2-short volumes, 1 central 3-short volume.
-#  we can actually count the dimensions and return the data however desired. i think the interest is in separate nonoverlapping minimally-sized volumes.
-# 
-#       the planes and bars might be more intuitive ...
-#           mostly we need the coordinates of the areas; a way to algorithmically fill them correctly
-#       so maybe it's helpful to have them nonoverlapping for correctly filling them with data
-# 
-# enumerate nonoverlapping volumes
-# say we engage '1' first. there is one nonverlapping volume between it and 0.
-# if we then move to '2' there is a clear nonoverlapping volume between it and 0.
-#   however in moving to '2' we are also increasing a new dimension.
-#   when increasing this new dimension we cross a nonoverlapping volume of size 3x1 between 2-3 and 0-1.
-# then '3' covers a nonoverlapping volume between '2' and '3'.
-#
-#   each dimension has a different span across values. when we progress dimension 0 we cross small overlapping volumes.
-#   when we progress dimension 1 we cross 3x1 nonverlapping valumes (and dimension 2 is 3x3x1 volumes) -- but these happen less frequently.
-
-# in that iteration, there are 4 1x1 1d volumes, 2 3x1 2d volumes, and 1 3x3x1 3d volume.
-# that is actually a total of 7 volumes. they could be each equated with one of the iterated moved areas.
-#
-# 0 - 1  - - -  4 - 5
-# - - -  - - -  - - -
-# 2 - 3  - - -  6 - 7
-#
-#   1: 1x1 0-1
-#   2? 3x1 ---
-#   3? 1x1 2-3
-#   4? 3x3x1 ---/---/---
-#   5? 1x1 4-5
-#   6? 3x1 ---
-#   7? 1x1 6-7
-# or
-#   0: 1x1 0-1
-#   1? 3x1 ---
-#   2? 1x1 2-3
-#   3? 3x3x1 ---/---/---
-#   4? 1x1 4-5
-#   5? 3x1 ---
-#   6? 1x1 6-7
-# the order may be the same whether one considers conditioning on a 0 coord or a 1 coord; i may have made a mistake
-# so it may make sense to do the 1-based iteration
-#   1: [1,0,0] : 1x1x1 0-1      deepdims=0  shortdims=3
-#   2: [0,1,0] : 3x1x1 01-23    deepdims=1  shortdims=2
-#   3: [1,1,0] : 1x1x1 2-3      deepdims=0  shortdims=3
-#   4: [0,0,1] : 3x3x10123-4567 deepdims=2  shortdims=1
-#   5: [1,0,1] : 1x1x1 4-5      deepdims=0  shortdims=3
-#   6: [1,1,0] : 3x1x1 45-67    deepdims=1  shortdims=2
-#   7: [1,1,1] : 1x1x1 6-7      deepdims=0  shortdims=3
-#   ...[0,0,0,1]..............  deepdims=3  shortdims=0  if 4d
-# i'm trying to figure out the pattern of deepdims/shortdims.
-# it's a clear pattern conditioned on the index number .. uh ... kinda like (idx%2 == 0) + (idx%4 == 0) + (idx%8 == 0)
-# if the indices were sparse instead of dense, it might be clearer
-#  these are a flattened list of coordinates, but the original list was created by combining a bunch of [1,0] pairs
-#  in that original list, the pattern is much more clearly present
-# roughly we need a way to get 4 0's, 2 1's, 1 2, and an arbitrary 8th value, out of 2x2x2 indices
-#   ok usually that's ummmmm
-#       dims are full/sub
-#   see with 1d you would want 1x 0/1
-#   with 2d you want 2x 0/2 and 1x 1/1
-#   then with 3d you want 4x 0/3, 2x 1/2, and 1x 2/1
-#   we could consider dimension n to be associated with 2**n slabs that have n short dimensions to them and are full in other dimensions
-#   if think in terms of shortdims its more intuitive.
-#   1d has 1 shortdim, that's it.
-#   a 2d item introduces 2 elements with 2 shortdims
-#   so if you were iterating a 2x2 rect, you could skip 0, then have [0,1] be a 2x1 slab, then [1,0] and [1,1] both be 1x1 slabs.
-#   3x3 iteration:
-#   [0,0,0]: skipped
-#   [0,0,1]: 2x2x1 slab
-#   [0,1,0]: 2x1x1 slab
-#   [0,1,1]: 2x1x1 slab
-#   [1,0,0]: 1x1x1 slab
-#   the rest are 1x1x1 slabs, for a total of 1 deepdims=2, 2 deepdims=1, and 4 deepdims=0 :)
-#   so each item ummmmmmm let's chart it again
-#
-# 0 - 1  - - -  4 - 5
-# - - -  - - -  - - -
-# 2 - 3  - - -  6 - 7
-#
-# 0: skipped
-# 1: [0,0,1]: this could be the 3x3x1 biggest volume ---/---/---
-# 2: [0,1,0]: this could be the 3x1x1 01---23
-# 3: [0,1,1]: this could be the 3x1x1 45---67
-# 4: [1,0,0]: this could be the 1x1x1 0-1
-# 5: [1,0,1]: this could be the 1x1x1 4-5 or 2-3
-# 6: [1,1,0]: 2-3 or 4-5
-# 7: [1,1,1]: 6-7
-#
-# maybe a different ordering could be clearer.
-# it seems like whether or not there is a 1 in an extreme dimension indicates the size
-# so the leftmost or rightmost one
-# the others indicate positioning :s maybe
-#
-# > 2: [0,1,0]: this could be the 3x1x1 01---23
-# > 3: [0,1,1]: this could be the 3x1x1 45---67
-# this middle data could reveal something
-# if we assume we can figure it's middle data from say [0,1,...]
-# the remaining bit indicates the position perpendicular to the axis of expansion
-# so if it is big on axis 0 (here), the 1/0 (coincidentalyl axis 2 here) is indicating the position in axis 2.
-# with [0,1,0] if we are considering leftmost or rightmost zeros (which could maybe be detected with a > check against the index ...
-## what about considering unflattened 
-#   the difference, re unflattened, relates to the permutation of the indices.
-#   when the indices are seen with coordinates in the outer dimension, one can see two sets of pairs:
-#       00 01
-#       11 01
-#   when the indices are seen with coordinates in the inner dimension such that each pair is a full index, it is more familiar, but less useful here:
-#       00 10
-#       01 11
-#   compressed: 00 01 10 11
-# what is 3d like
-#   3d, coords in outer dimension:
-#       00 11  00 00  01 01
-#       00 11  11 11  01 01
-#   3d, coords in inner dimension:
-#       000 010  100 110  
-#       001 011  101 111
-#   compressed: 000 001 010 011 100 101 110 111
-#       [reordered above with np.indices rather than xp.meshgrid to have consistent order]
-#   i'm kind of seeing that for each location we have a value for each dimension
-#   our size on each dimension may actually depend on this value
-#   if we consider it spreading. we have more small things than bigger things, so if we consider some dimension being set (or unset)
-#   making _all_ dimensions of the empty shape that are >= or <= to it small, i think then it works.
-#       so like if our dimension #3 is set, then all dimensions [:3+1] or [3:] or such would become small
-#       ok !
-#
-#   ok i added ray_dimensions to follow that pattern to set sizes, but a little more is needed
-#   . gotta decide on what bounds to give them. unsure how intuitive the endpoitns are. 
-#   some things are in the middle, some things on the edge.
-#   the biggest slab is in the middle.
-#   but then nothing else is in the middle in that dimension ..
-#   in the next dimension, that dimension that was placed before, is alternated. it takes the value of one of the coordinates.
-#   when the coordinate is low, it spreads in one manner, when it is high it spreads in a different manner
-#
-# 0 - 1  - - -  4 - 5
-# - - -  - - -  - - -
-# 2 - 3  - - -  6 - 7
-#
-# 1 [0,0,1] ---/---/--- [:,:,lo:hi]
-# 2 [0,1,0] 01---23     [:,lo:hi,:lo]
-# 3 [0,1,1] 45---67     [:,lo:hi,hi:]
-# 4 [1,0,0] 0 - 1       [lo:hi,:lo,:lo]
-# 5 [1,0,1] 2 - 3       [lo:hi,:lo,hi:]
-# 6 [1,1,0] 4 - 5       [lo:hi,hi:,:lo]
-# 7 [1,1,1] 6 - 7       [lo:hi,hi:,hi:]
-#
-# there we go. after the first 1, the following values set whether the slice is :lo or hi: to fill the construct
-
+        def __repr__(self):
+            return ( 'NDArray.Subview(' +
+                (repr(self.parent)+',\nbounds=').replace('\n','\n                ') +
+                repr(self.bounds).replace('\n','\n                       ') +
+            ')')
+        def __str__(self):
+            return str(self.data)
 
 if __name__ == '__main__':
     ndlist1 = NDArray(xp.asarray([1,2,3]))
@@ -335,6 +179,7 @@ if __name__ == '__main__':
     ndlist2.insert(1, 1, xp.asarray([[9,10],[11,12],[13,14],[15,16]]))
     assert xp.all(ndlist2.data == xp.asarray([[1,9,10,2],[5,11,12,6],[7,13,14,8],[3,15,16,4]]))
 
-    ndlist2b = NDArray(xp.asarray([[1,2],[3,4]]))
-    holes = ndlist2b._insert_empty([1,1],[1,1])
-    import pdb; pdb.set_trace()
+    ndlist3 = NDArray(xp.asarray([[[1,2],[3,4]],[[5,6],[7,8]]]))
+    for hole in ndlist3.insert_empty([1,1,1],[1,1,1]):
+        hole[:,...] = 9
+    assert xp.all(ndlist3.data == xp.asarray([[[1,9,2],[9]*3,[3,9,4]],[[9]*3]*3,[[5,9,6],[9]*3,[7,9,8]]]))
