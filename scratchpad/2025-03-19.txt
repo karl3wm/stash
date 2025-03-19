@@ -114,3 +114,11 @@ the iteration count. it's hard to consider the iteration count alongside the iss
 but basically it looks like i can avoid the concern by assuming that math.gcd() fills a cache
 when used, and only running it once to test results.
 
+--
+
+after returning to my real code comparing with the baseline from stack
+overflow, it looks like a major issue is that `cl` is an instance of a `zip`
+iterator.  after its first use, it is empty, but python doesn't throw an
+exception for using it again -- it iterates an empty list.  this is likely why
+it was appearing as if list iteration were taking only a few microseconds. the
+zip iterator had been exhausted. as opposed to gcd caching.
