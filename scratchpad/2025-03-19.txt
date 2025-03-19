@@ -74,3 +74,21 @@ math_gcd 0.11253344092983752
 numpy_mod 0.005545707070268691
 
     i'll probably mutate fails-baseline to be more like the other two
+    and i named 0008-fails-noprecalc wrong.
+    i'll rename them to 0008-fails-precalc.py and 0008-succeeds-noprecalc.py
+
+0008-fails-baseline-0002.py
+math_gcd 0.0003096899017691612
+numpy_gcd 0.12585521198343486
+0008-fails-baseline.py
+numpy_gcd 0.12426589406095445
+gcd 0.0002321799984201789
+0008-fails-precalc.py
+math_gcd 8.600763976573944e-07
+numpy_mod 0.0071806469932198524
+0008-succeeds-precalc.py
+math_gcd 0.12951314100064337
+numpy_mod 0.006288076983764768
+
+    difference still present.
+    i'm guessing it relates to the number of iterations here.
