@@ -2,4 +2,13 @@ I'm running into an issue where a python loop over integers calling gcd() appear
 
 I'm making a folder here with a test python file in it to troubleshoot.
 
-The test did not reproduce the issue. I'll need to bisect from the original code.
+The test did not reproduce the issue. I'll need to bisect from the original code to see what stimulates it. Nice to see numpy behaving fast again.
+
+I'm actually getting quite different numbers. I'd better track these things.
+
+2025-03-19
+	0000-test.py test file, does not appear to replicate behavior. math_gcd = 0.1154  numpy_mod = 0.00646
+	0001.py code demonstrating issue, unisolated.                  math_gcd = 1.92e-6 igcd = 0.00498
+	observing now that an editing mistake is in the file: I meant to return prior to the `if` block, short-circuiting it. i was not testing what i thought i was.
+	maybe i made the change and forgot to save the file before running it.
+	0002.py readded the short circuit. still demonstrates issue.   math_gcd = 1.48e-6 igcd = 0.004177
