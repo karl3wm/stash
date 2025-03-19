@@ -24,3 +24,14 @@ However, this test is taken from https://stackoverflow.com/a/15570694/29165416 w
 It did not pass number=1 to timeit, running instead each expression a million times.
 I added the number=1 to try to address a problem just like the one just resolved.
 So the original concern is not yet isolated.
+
+    0006-baseline.py ported the so code to a python3 sourcefile   gcd = 0.0934        numpy_gcd = 115.014
+
+ok, so now I'm seeing the issue again even in this code.
+I thought I didn't see the issue running this code locally earlier. And it looks like the poster is using ipython sessions or something when they don't demonstrate the issue.
+I'm guessing that both I and the poster had earlier run the code in different contexts in some manner such that the caching didn't happen.
+Also noting that this kind of caching is strange to see: it seems like a JIT-style feature that avoids evaluating all the bytecode. I could be wrong.
+Usually cpython gives the impression of being pretty strict with regard to evaluating all its bytecode.
+
+So lets see if this is changed by removing the same line.
+
