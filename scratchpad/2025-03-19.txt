@@ -92,3 +92,8 @@ numpy_mod 0.006288076983764768
 
     difference still present.
     i'm guessing it relates to the number of iterations here.
+
+0008-fails-baseline-0003.py upped n by 1000, dropped timeit number to 1 math=0.1128 numpy=0.122
+
+this is the first one where the two appear the same speed, it's kind of like a 4th case.
+
