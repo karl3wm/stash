@@ -7,9 +7,13 @@ The test did not reproduce the issue. I'll need to bisect from the original code
 I'm actually getting quite different numbers. I'd better track these things.
 
 2025-03-19
-	0000-test.py test file, does not appear to replicate behavior. math_gcd = 0.1154  numpy_mod = 0.00646
-	0001.py code demonstrating issue, unisolated.                  math_gcd = 1.92e-6 igcd = 0.00498
-	observing now that an editing mistake is in the file: I meant to return prior to the `if` block, short-circuiting it. i was not testing what i thought i was.
-	maybe i made the change and forgot to save the file before running it.
-	0002.py readded the short circuit. still demonstrates issue.   math_gcd = 1.48e-6 igcd = 0.004177
-	0003.py removed extra things from 0002.py, changed names.      math_gcd = 1.61e-6 numpy_mod = 0.00617
+    0000-test.py test file, does not appear to replicate behavior. math_gcd = 0.1154  numpy_mod = 0.00646
+    0001.py code demonstrating issue, unisolated.                  math_gcd = 1.92e-6 igcd = 0.00498
+    observing now that an editing mistake is in the file: I meant to return prior to the `if` block, short-circuiting it. i was not testing what i thought i was.
+    maybe i made the change and forgot to save the file before running it.
+    0002.py readded the short circuit. still demonstrates issue.   math_gcd = 1.48e-6 igcd = 0.004177
+    0003.py removed extra things from 0002.py, changed names.      math_gcd = 1.61e-6 numpy_mod = 0.00617
+    0004-shows-disparity-across-two-changes.py i simplified the test function and removed two unused lines
+        it no longer shows the issue -- now math_gcd is slow again.
+        i'm guessing it's the unused line removal that caused this.
+        i'm guessing that python is caching the result.            math_gcd = 0.11312 numpy_mod = 0.0064
