@@ -34,4 +34,8 @@ Also noting that this kind of caching is strange to see: it seems like a JIT-sty
 Usually cpython gives the impression of being pretty strict with regard to evaluating all its bytecode.
 
 So lets see if this is changed by removing the same line.
+Oops I'll also reduce the iteration count so I don't have to wait 100-250 seconds for the result.
 
+    0007.py removed the same line from baseline and reduced count   gcd = 0.0002      numpy_gcd = 0.1286
+
+Ok, so now we're strangely seeing the same issue even with the caching line removed!
