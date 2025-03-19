@@ -96,4 +96,18 @@ numpy_mod 0.006288076983764768
 0008-fails-baseline-0003.py upped n by 1000, dropped timeit number to 1 math=0.1128 numpy=0.122
 
 this is the first one where the two appear the same speed, it's kind of like a 4th case.
+the biggest speed-related factor remaining that i think of first is that it's calculating
+the gcd instead of just the module. so i'll make that change. but it does leave it more confusing.
+
+i guess i'd better rename the file. 0008-midway.py .
+
+0008-midway-0002.py                                                     math=0.1439 numpy=0.0055
+
+now it's succeeding, after:
+    - changing the timeit iterations to 1
+    - changing the item count to 2000*1000
+    - changing the function to the modulus operator
+
+feeling this out as i engage it, i'm guessing i'm having some psychological response to
+the iteration count. it's hard to consider the iteration count alongside the issue.
 
