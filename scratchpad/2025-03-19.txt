@@ -111,3 +111,6 @@ now it's succeeding, after:
 feeling this out as i engage it, i'm guessing i'm having some psychological response to
 the iteration count. it's hard to consider the iteration count alongside the issue.
 
+but basically it looks like i can avoid the concern by assuming that math.gcd() fills a cache
+when used, and only running it once to test results.
+
