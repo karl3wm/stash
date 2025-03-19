@@ -1,0 +1,5 @@
+I'm running into an issue where a python loop over integers calling gcd() appears to execute faster than a numpy modulo operation over a vector of the same data.
+
+I'm making a folder here with a test python file in it to troubleshoot.
+
+The test did not reproduce the issue. I'll need to bisect from the original code.
