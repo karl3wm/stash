@@ -17,3 +17,10 @@ I'm actually getting quite different numbers. I'd better track these things.
         it no longer shows the issue -- now math_gcd is slow again.
         i'm guessing it's the unused line removal that caused this.
         i'm guessing that python is caching the result.            math_gcd = 0.11312 numpy_mod = 0.0064
+    0005.py i added a line back and the issue returned             math_gcd = 9.4e-7  numpy_mod = 0.0069
+
+So I've now found a change that causes this particular issue to appear or disappear.
+However, this test is taken from https://stackoverflow.com/a/15570694/29165416 which did indeed include a line like this, and did indeed show numpy as faster than math.gcd .
+It did not pass number=1 to timeit, running instead each expression a million times.
+I added the number=1 to try to address a problem just like the one just resolved.
+So the original concern is not yet isolated.
