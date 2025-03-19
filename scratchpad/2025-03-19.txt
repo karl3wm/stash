@@ -12,3 +12,4 @@ I'm actually getting quite different numbers. I'd better track these things.
 	observing now that an editing mistake is in the file: I meant to return prior to the `if` block, short-circuiting it. i was not testing what i thought i was.
 	maybe i made the change and forgot to save the file before running it.
 	0002.py readded the short circuit. still demonstrates issue.   math_gcd = 1.48e-6 igcd = 0.004177
+	0003.py removed extra things from 0002.py, changed names.      math_gcd = 1.61e-6 numpy_mod = 0.00617
