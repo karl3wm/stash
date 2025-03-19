@@ -39,3 +39,38 @@ Oops I'll also reduce the iteration count so I don't have to wait 100-250 second
     0007.py removed the same line from baseline and reduced count   gcd = 0.0002      numpy_gcd = 0.1286
 
 Ok, so now we're strangely seeing the same issue even with the caching line removed!
+
+So that's quite confusing and I'm not sure what's causing it here (although I
+imagine it could be some subtle JIT behavior difference between the
+sourceblobs, since the caching could happen inside the timeit loop too), but
+there's now enough information to identify another cause and hence another
+usseful part of the overall behavior as we have one that fails and one that
+succeeds.
+
+  0007.py: does do an additional early pass with math.gcd, does show a strangely much faster math.gcd than numpy result
+  0004-*.py: does not do an additional early pass, and correctly shows numpy as faster than a loop
+  0005.py: does do an additional early pass, and does show a strangely faster math.gcd loop
+  otherwise, 0005 is purportedly identical to 0004
+
+  so by moving 0007 and 0004/0005 to be more similar, we can in theory find a 2nd property that
+  determines whether [math.gcd] appears faster or np.array()% does.
+
+  lets give these different files different names depending on their properties,
+  and slowlt mutate 1 property at a time as if to eventually make them the same file,
+  and see where a change develops.
+
+  0007 can be 'baseline' cause it had that name earlier, maybe 'baseline-fails' or 'fails-baseline'
+  0004 can be 'succeeds'
+  0005 can be 'fails-noprecalc'
+
+0008-fails-baseline.py
+numpy_gcd 0.12536599591840059
+gcd 0.0003226289991289377
+0008-fails-noprecalc.py
+math_gcd 1.0200310498476028e-06
+numpy_mod 0.006636276957578957
+0008-succeeds.py
+math_gcd 0.11253344092983752
+numpy_mod 0.005545707070268691
+
+    i'll probably mutate fails-baseline to be more like the other two
