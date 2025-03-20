@@ -3,7 +3,7 @@ class NDBigInt:
     def __init__(self, data):
         if type(data) is NDBigInt:
             self._data = data._data
-            self._xp = data._xp
+            self.xp = data.xp
         else:
             xp = self.xp = data.__array_namespace__()
             # the initial data must already be an ndarray of integers
@@ -42,25 +42,52 @@ class NDBigInt:
             working_data[...,1:] += hi_bit_mask[...,:-1] >> 63
     def __int__(self):
         accum = 0
-        for item in self.xp.unstack(self._data):
+        for item in self.xp.unstack(self._data[...,::-1]):
             accum <<= 64
             accum += int(item)
         return accum
-    #def __str__(self):
-    #    idx = [0] * len(self._data.shape)
-    #    result = 'NDBigInt: '
-    #    indent = ' ' * len(result)
-    #    result += '[' * len(idx)
-    #    for rowidx in range(self._data.shape[-2]):
-            
+    def __getitem__(self, slices):
+        item = NDBigInt(self)
+        if type(slices) is tuple:
+            item._data = item._data[*slices,:]
+        else:
+            item._data = item._data[slices,:]
+        return item
+    def __str__(self):
+        xp = self.xp
+        shape = self._data.shape
+        idx = [0] * (len(shape) - 2)
+        off = len(idx) - 1
+        depth = 0
+        result = 'NDBigInt: '
+        indent = ' ' * len(result)
+        #result += '[' * len(idx)
+        result += '\n'
+        if len(shape) > 2:
+            rowidcs = [[idx] for idx in range(shape[-3])]
+        else:
+            rowidcs = [[]]
+        while True:
+            for rowidx in rowidcs:
+                row = self[*idx, *rowidx, :]
+                row = [str(int(row[i])) for i in range(shape[-2])]
+                result += indent + '[' + ',\t'.join(row) + ']\n'
+            while True:
+                if off == -1:
+                    return result
+                idx[off] += 1
+                if idx[off] < shape[off]:
+                    break
+                idx[off] = 0
+                off -= 1
         
-def __NDBigIntOpWordwiseUnaryAllocating(opname):
-    def op(a, *params, **kwparams):
-        c = NDBigInt(getattr(a._data, opname)(*params, **kwparams))
-        c._expandshift()
-        return c
-    op.__name__ = opname
-    return op
+#def __NDBigIntOpWordwiseUnaryAllocating(opname):
+#    def op(a, *params, **kwparams):
+#        c = NDBigInt(getattr(a._data, opname)(*params, **kwparams))
+#        c._expandshift()
+#        return c
+#    op.__name__ = opname
+#    return op
 def __NDBigIntOpWordwiseBinaryInplace(opname):
     def op(a, b, *params, **kwparams):
         if type(b) is not NDBigInt:
@@ -85,10 +112,11 @@ for opname, factory in [
             for opname in [
                 'add','sub'#,'mul','matmul','floordiv',
                 #'mod','divmod',
-                'lshift','and','xor','or'
+                #'lshift',
+                'and','xor','or'
             ]
-        ] + [
-            ['getitem', __NDBigIntOpWordwiseUnaryAllocating]
+        #] + [
+        #    ['getitem', __NDBigIntOpWordwiseUnaryAllocating]
         ]
 ]:
     setattr(NDBigInt, opname, factory(opname))
