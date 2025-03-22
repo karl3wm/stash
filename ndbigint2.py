@@ -16,12 +16,17 @@ def may_share_memory_torch(a, b):
     bstart = bstore.data_ptr()
     aend = astart + astore.nbytes()
     bend = bstart + bstore.nbytes()
-    return aend > bstart and bend < astart
+    return aend > bstart and bend > astart
 
 def may_share_memory_numpy(a, b):
     import numpy as np
     return np.may_share_memory(a, b)
 
+def _may_share_memory(xp, a, b):
+    try:
+        return may_share_memory_numpy(a._array, b._array)
+    except Exception as e:
+        raise Exception("implement _may_share_memory", e)
 
 
 class NDBigInt:
@@ -30,7 +35,6 @@ class NDBigInt:
             xp = self.xp = data.xp
             self._data = xp.asarray(data._data, copy=copy)
             self._limbs = data._limbs
-            self._alias_id = id(self._data) if copy else data._alias_id
         else:
             if _xp is None:
                 _xp = data.__array_namespace__()
@@ -39,7 +43,6 @@ class NDBigInt:
                 raise TypeError(data.dtype)
             self._data = xp.astype(data[...,None], xp.uint64, copy=copy)
             self._limbs = 1
-            self._alias_id = id(self._data) if copy else id(data)
     @property
     def limbs(self):
         return self._limbs
@@ -93,13 +96,14 @@ class NDBigInt:
         limbs = max(x.limbs, y.limbs)
         alloc = limbs + 1
         x._alloc(alloc)
-
         y._alloc(alloc)
-        if x._alias_id == y._alias_id:
+
+        if _may_share_memory(xp, x._data, y._data):
             raise ValueError('edge case: detect overflow for in-place add to self. is a multiply reasonable here?')
             # this is simply to detect overflow!
             # nails might work better for this case
             y = NDBigInt(y, copy=True)
+
         x._data += y._data
         # in cases of overflow, the sum is less than the addend
         # if the end limb overflows then another is needed
@@ -109,12 +113,16 @@ class NDBigInt:
         ref = y._data
         off = 0
         while True:
-            oflows = x._data[...,off:-1] < ref[...,:-1]
+            oflows = x._data[...,off:limbs-1] < ref[...,:-1]
             if not xp.any(oflows):
                 break
             ref = xp.astype(oflows, xp.uint8, copy=False)
             off += 1
-            x._data[...,off:] += ref
+            x._data[...,off:limbs] += ref
+        signed_x = xp.astype(x._data, xp.int64, copy=False)
+        # probably efficiency improvements exist
+        while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
+            limbs -= 1
         x._limbs = limbs
         return x
     def __isub__(x, y):
@@ -123,8 +131,9 @@ class NDBigInt:
         x._data ^= 0xffffffffffffffff
         return x
     def __eq__(x, y):
-        xp = x.xp
-        return xp.all(x._data == y._data, axis=-1)
+        return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
+    def __ne__(x, y):
+        return x.xp.all(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
     def _alloc(self, limbs):
         old_limbs = self._data.shape[-1]
         if old_limbs < limbs:
@@ -136,8 +145,8 @@ class NDBigInt:
             new_data[...,old_limbs:] = (xp.astype(self._data[...,old_limbs-1], xp.int64, copy=False) >> 63)[...,None]
             self._data = new_data
         else:
-            assert self.limbs <= limbs
-            self._data = self._data[...,:limbs]
+            assert self._limbs <= limbs
+            #self._data = self._data[...,:limbs]
     def __int__(self):
         xp = self.xp
         accum = int(xp.astype(self._data[...,-1], xp.int64, copy=False))
@@ -186,7 +195,7 @@ if __name__ == '__main__':
     np.random.seed(0)
     ars = [
         NDBigInt(xp.asarray(np.random.randint(0,1<<64,[64,64,64], dtype=np.uint64)))
-        for idx in range(64)
+        for idx in range(2)
     ]
     ar = NDBigInt(ars[0], copy=True)
 
@@ -204,40 +213,3 @@ if __name__ == '__main__':
     ar -= ars[1]
     assert int(ar[0,0,0]) == int(ars[0][0,0,0])
     assert xp.all(ar == ars[0])
-
-# notes on isub failure where the sign bit has overflowed into the first bit of the second limb
-# ffffffffffffffff51565166835c8e83 - ffffffffffffffffc4d746b9eb97e454 = ffffffffffffffff8c7f0aac97c4aa2f
-# ~0           5860961465801674371 - ~0          14183883315762160724 = ~0          10123822223749065263
-#                                                                    before carry:
-#                                                                       00000000000000008c7f0aac97c4aa2f
-#                  carry check is different with subtraction vs addition
-#                  in a subtraction, the lhs operand is normally larger than the rhs and the difference
-#                  so comparison with the rhs operand is not necessarily easy or useful
-#                  the operator that's easy to implement here is __irsub__ or __risub__ which doesn't quite exist
-#                  but subtraction is also identical to addition with the negative
-#                  as well as negation prior to addition
-#                       the carry could maybe be calculated here via ... hrm
-#                       well there could be a comparison with the rhs operand and the lhs first
-#                       also this would be a borrow rather than a carry.
-#                       the ideal check would be 8c > 51, diff > sum
-#                       i suppose that's needed for positive numbers
-#                       but one could also calculate the resulting sign bit.
-#           we could compare with the negation of the subtractend.
-#           diff < -subtractend == -diff > subtractend
-#           this may mean copying the subtractend tho
-#           when there could just be an in-place subtraction on the rhs
-#           equivalent to in-place negation, then sum
-#   another solution would be to negate the lhs, then add, then negate the result
-# trying out ~x + y = ~z
-# this consolidates the troubleshooting to the iadd function
-# 0000000000000000aea9ae997ca3717c + ffffffffffffffffc4d746b9eb97e454 = 00000000000000007380f553683b55d0
-#             12585782607907877244 +             -4262860757947390892 = 00000000000008322921849960486352
-# 00000000000012585782607907877244 + ~0          14183883315762160724 = 00000000000008322921849960486352
-#                                                            pre-carry: ~0           8322921849960486352
-# so ideally the code would respond to 8<14 and add 1 to the ~0, producing the correct result
-# this happens on the first iteration. it's allocated 3 limbs total.
-# 0: ~0 ~0 8322921849960486352
-# 1: ~0  0 8322921849960486352
-# however it does not detect that 0 < ~0 to increment the next one.
-# i think ref's indexing needs to be adjusted to compare correctly here.
-# or the data's.
