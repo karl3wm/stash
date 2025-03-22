@@ -41,7 +41,7 @@ class NDBigInt:
             xp = self.xp = _xp
             if not xp.isdtype(data.dtype, 'integral'):
                 raise TypeError(data.dtype)
-            self._data = xp.astype(data[...,None], xp.uint64, copy=copy)
+            self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
             self._limbs = 1
     @property
     def limbs(self):
@@ -92,8 +92,26 @@ class NDBigInt:
         else:
             return x[*preceding_axes,0,...]
 
+    def _tolist(*xs, visitor = None):
+        if visitor is None:
+            if len(xs) == 1:
+                visitor = lambda x: int(x)
+            else:
+                visitor = lambda *xs: [int(x) for x in xs]
+        self = xs[0]
+        if len(self.shape):
+            return [
+                self[idx,...]._tolist(*[x[idx,...] for x in xs[1:]], visitor=visitor)
+                for idx in range(self.shape[0])
+            ]
+        else:
+            return visitor(*xs)
+
     def __iadd__(x, y):
         xp = x.xp
+        #x_list = x._tolist()
+        #y_list = y._tolist()
+        #expected_sum = x._tolist(y, visitor=lambda x, y: int(x) + int(y))
         limbs = max(x.limbs, y.limbs)
         alloc = limbs + 1
         x._alloc(alloc)
@@ -125,11 +143,21 @@ class NDBigInt:
         while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
             limbs -= 1
         x._limbs = limbs
+        #actual_sum = x._tolist()
+        #assert expected_sum == actual_sum
         return x
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
         x += y
         x._data ^= 0xffffffffffffffff
+        return x
+    def __add__(x, y):
+        x = NDBigInt(x, copy=True)
+        x += y
+        return x
+    def __sub__(x, y):
+        x = NDBigInt(x, copy=True)
+        x -= y
         return x
     def __eq__(x, y):
         return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
@@ -192,6 +220,9 @@ class NDBigInt:
 
 if __name__ == '__main__':
     import array_api_strict as xp
+
+    assert int(NDBigInt(xp.asarray(-6532100632237123854)) + NDBigInt(xp.asarray(7958265450555812818))) == 1426164818318688964
+
     import numpy as np
     np.random.seed(0)
     ars = [
