@@ -78,6 +78,7 @@ class NDBigInt:
         x._reserve(alloc)
         y._reserve(alloc)
         y_limbs = y._data[...,:limbs]
+        raise NotImplementedError('one approach to improve might be to sum in the extra unused limb, to handle large negative plus small positive, as well as open a 0 up for the summed sign bit for negative plus negative. but it should be done properly.')
         x._data[...,:limbs] += y_limbs
         # in cases of overflow, the sum is less than the addend
         # if a value all 0xf, as for negative numbers, there will be multiple chained overflows
@@ -200,50 +201,3 @@ if __name__ == '__main__':
     ar -= ars[1]
     assert int(ar[0,0,0]) == int(ars[0][0,0,0])
     assert xp.all(ar == ars[0])
-
-
-# notes on addition error
-# - the initial summation produces the correct full result
-#   using sign extension without any carry
-# - however, because the numbers are negative, of course there is carry
-#   when they are treated as unsigned.
-# - what is not detected is that this makes the final byte 0, overflowwing
-#   into any interpretation of sign flag
-
-# so that's notable with both x and y here. additionally, i suspect
-#  this case can only happen when both values are negative
-
-# so if the two addends are both negative, and the sum is not negative,
-# then .... uh ... the final carry bit shouldn't be added i guess?
-# at ... what point?
-# i guess at the end of the top limb
-
-# it realtes to the final oflow
-# but this could also relate to the oher oflows accumulating
-# if we consider in general blocks of 0xf summing
-
-# this problem is kind of a special case of not accumulating 0xf blocks
-
-# 0x06 0xff 0xff 0x06
-# 0x01 0x00 0x00 0xfa
-# -------------------
-# 0x07         1
-# 0x07    1
-# 0x08 0x00 0x00 0x00
-
-# this would happen mostly only for negative numbers
-# and occasionally for positive
-# and would usually overflow as it's a negative number
-
-# so the theory is something like
-# (a) it would need to check for overflow after carry again
-# (b) if the sign bit is overflowed into, it might be a special case
-#     in that a negative sign bit should stay negative
-
-# there's maybe a remaining concern that small negative numbers
-# in tensors with many limbs then always hit the worst case maximum
-# number of repeated iterations
-
-# # one idea is to consider using a negative representation somewhere
-# # it's a += / -= operation
-# given that l
