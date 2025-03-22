@@ -219,4 +219,5 @@ if __name__ == '__main__':
     sum2 = ars[0].sum(axis=0)
     assert int(sum2[0,0]) == sum([int(ars[0][idx,0,0]) for idx in range(ars[0].shape[0])])
     sum2 += ars[2].sum(axis=0)
+    assert int(sum2[0,0]) == int(sum1[0,0])
     assert xp.all(sum1 == sum2)
