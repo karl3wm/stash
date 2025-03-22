@@ -7,12 +7,30 @@
 #  the first dimension might be more computationally efficient and would simply
 #    mean permuting axes to broadcast consistently.
 
+def may_share_memory_torch(a, b):
+    if a.device != b.device:
+        return False
+    astore = a.storage()
+    bstore = b.storage()
+    astart = astore.data_ptr()
+    bstart = bstore.data_ptr()
+    aend = astart + astore.nbytes()
+    bend = bstart + bstore.nbytes()
+    return aend > bstart and bend < astart
+
+def may_share_memory_numpy(a, b):
+    import numpy as np
+    return np.may_share_memory(a, b)
+
+
+
 class NDBigInt:
     def __init__(self, data, *, _xp=None, copy=None):
         if type(data) is NDBigInt:
             xp = self.xp = data.xp
             self._data = xp.asarray(data._data, copy=copy)
             self._limbs = data._limbs
+            self._alias_id = id(self._data) if copy else data._alias_id
         else:
             if _xp is None:
                 _xp = data.__array_namespace__()
@@ -21,6 +39,7 @@ class NDBigInt:
                 raise TypeError(data.dtype)
             self._data = xp.astype(data[...,None], xp.uint64, copy=copy)
             self._limbs = 1
+            self._alias_id = id(self._data) if copy else id(data)
     @property
     def limbs(self):
         return self._limbs
@@ -30,7 +49,7 @@ class NDBigInt:
     def broadcast_arrays(*arrays):
         xp = arrays[0].xp
         limbs = max([ary.limbs for ary in arrays])
-        [ary._reserve(limbs) for ary in arrays]
+        [ary._alloc(limbs) for ary in arrays]
         return [
             NDBigInt(ary, _xp = xp)
             for ary in xp.broadcast_arrays(*[ary._data for ary in arrays])
@@ -70,71 +89,55 @@ class NDBigInt:
         else:
             return x
     def __iadd__(x, y):
-        # copy of __isub__ with -= changed to +=
-
         xp = x.xp
         limbs = max(x.limbs, y.limbs)
         alloc = limbs + 1
-        x._reserve(alloc)
-        y._reserve(alloc)
-        y_limbs = y._data[...,:limbs]
-        raise NotImplementedError('one approach to improve might be to sum in the extra unused limb, to handle large negative plus small positive, as well as open a 0 up for the summed sign bit for negative plus negative. but it should be done properly.')
-        x._data[...,:limbs] += y_limbs
+        x._alloc(alloc)
+
+        y._alloc(alloc)
+        if x._alias_id == y._alias_id:
+            raise ValueError('edge case: detect overflow for in-place add to self. is a multiply reasonable here?')
+            # this is simply to detect overflow!
+            # nails might work better for this case
+            y = NDBigInt(y, copy=True)
+        x._data += y._data
         # in cases of overflow, the sum is less than the addend
-        # if a value all 0xf, as for negative numbers, there will be multiple chained overflows
-        ref = y_limbs[...,:-1]
+        # if the end limb overflows then another is needed
+        if xp.any(x._data[...,limbs-1] < y._data[...,limbs-1-1]):
+            limbs = alloc
+        # if a limb is all 0xf, as for negative numbers, there will be multiple chained overflows
+        ref = y._data
+        off = 0
         while True:
-            oflows = x._data[...,:limbs-1] < ref
+            oflows = x._data[...,off:-1] < ref[...,:-1]
             if not xp.any(oflows):
                 break
             ref = xp.astype(oflows, xp.uint8, copy=False)
-            x._data[...,1:limbs] += ref
-        # if the last bit overflows, we don't want to change the sign of the result, and need to increase the limbs.
-        end_oflows = x._data[...,limbs-1] < y_limbs[...,-1]
-        if xp.any(end_oflows):
-            x._data[...,limbs] |= xp.astype(end_oflows, xp.uint8, copy=False)
-            limbs = alloc
+            off += 1
+            x._data[...,off:] += ref
         x._limbs = limbs
         return x
     def __isub__(x, y):
-        # copy of __iadd__ with += changed to -=
-
-        xp = x.xp
-        limbs = max(x.limbs, y.limbs)
-        alloc = limbs + 1
-        x._reserve(alloc)
-        y._reserve(alloc)
-        y_limbs = y._data[...,:limbs]
-        x._data[...,:limbs] -= y_limbs
-        # in cases of overflow, the sum is less than the addend
-        # if a value all 0xf, as for negative numbers, there will be multiple chained overflows
-        ref = y_limbs[...,:-1]
-        while True:
-            oflows = x._data[...,:limbs-1] < ref
-            if not xp.any(oflows):
-                break
-            ref = xp.astype(oflows, xp.uint8, copy=False)
-            x._data[...,1:limbs] -= ref
-        # if the last bit overflows, we don't want to change the sign of the result, and need to increase the limbs.
-        end_oflows = x._data[...,limbs-1] < y_limbs[...,-1]
-        if xp.any(end_oflows):
-            x._data[...,limbs] |= xp.astype(end_oflows, xp.uint8, copy=False)
-            limbs = alloc
-        x._limbs = limbs
+        x._data ^= 0xffffffffffffffff
+        x += y
+        x._data ^= 0xffffffffffffffff
         return x
     def __eq__(x, y):
         xp = x.xp
         return xp.all(x._data == y._data, axis=-1)
-    def _reserve(self, limbs):
-        old_limbs = self.limbs
+    def _alloc(self, limbs):
+        old_limbs = self._data.shape[-1]
         if old_limbs < limbs:
             xp = self.xp
             new_data = xp.empty([*self._data.shape[:-1], limbs], dtype=xp.uint64)
             new_data[...,:old_limbs] = self._data[...,:old_limbs]
             # sign extension
-            #new_data[old_limbs:,self._data[-1,...]>=UINT64_SIGN] = UINT64_MAX
+            #new_data[self._data[...,-1]>=UINT64_SIGN,old_limbs:] = UINT64_MAX
             new_data[...,old_limbs:] = (xp.astype(self._data[...,old_limbs-1], xp.int64, copy=False) >> 63)[...,None]
             self._data = new_data
+        else:
+            assert self.limbs <= limbs
+            self._data = self._data[...,:limbs]
     def __int__(self):
         xp = self.xp
         accum = int(xp.astype(self._data[...,-1], xp.int64, copy=False))
@@ -180,7 +183,7 @@ class NDBigInt:
 if __name__ == '__main__':
     import array_api_strict as xp
     import numpy as np
-    np.random.seed(1)
+    np.random.seed(0)
     ars = [
         NDBigInt(xp.asarray(np.random.randint(0,1<<64,[64,64,64], dtype=np.uint64)))
         for idx in range(64)
@@ -189,7 +192,7 @@ if __name__ == '__main__':
 
     simple_test_ndbi = NDBigInt(ar[0,0,0], copy=True)
     simple_test_i = int(simple_test_ndbi)
-    simple_test_ndbi += simple_test_ndbi
+    simple_test_ndbi += NDBigInt(simple_test_ndbi, copy=True)
     assert int(simple_test_ndbi) == simple_test_i * 2
 
     a0000 = int(ars[0][0,0,0])
@@ -201,3 +204,40 @@ if __name__ == '__main__':
     ar -= ars[1]
     assert int(ar[0,0,0]) == int(ars[0][0,0,0])
     assert xp.all(ar == ars[0])
+
+# notes on isub failure where the sign bit has overflowed into the first bit of the second limb
+# ffffffffffffffff51565166835c8e83 - ffffffffffffffffc4d746b9eb97e454 = ffffffffffffffff8c7f0aac97c4aa2f
+# ~0           5860961465801674371 - ~0          14183883315762160724 = ~0          10123822223749065263
+#                                                                    before carry:
+#                                                                       00000000000000008c7f0aac97c4aa2f
+#                  carry check is different with subtraction vs addition
+#                  in a subtraction, the lhs operand is normally larger than the rhs and the difference
+#                  so comparison with the rhs operand is not necessarily easy or useful
+#                  the operator that's easy to implement here is __irsub__ or __risub__ which doesn't quite exist
+#                  but subtraction is also identical to addition with the negative
+#                  as well as negation prior to addition
+#                       the carry could maybe be calculated here via ... hrm
+#                       well there could be a comparison with the rhs operand and the lhs first
+#                       also this would be a borrow rather than a carry.
+#                       the ideal check would be 8c > 51, diff > sum
+#                       i suppose that's needed for positive numbers
+#                       but one could also calculate the resulting sign bit.
+#           we could compare with the negation of the subtractend.
+#           diff < -subtractend == -diff > subtractend
+#           this may mean copying the subtractend tho
+#           when there could just be an in-place subtraction on the rhs
+#           equivalent to in-place negation, then sum
+#   another solution would be to negate the lhs, then add, then negate the result
+# trying out ~x + y = ~z
+# this consolidates the troubleshooting to the iadd function
+# 0000000000000000aea9ae997ca3717c + ffffffffffffffffc4d746b9eb97e454 = 00000000000000007380f553683b55d0
+#             12585782607907877244 +             -4262860757947390892 = 00000000000008322921849960486352
+# 00000000000012585782607907877244 + ~0          14183883315762160724 = 00000000000008322921849960486352
+#                                                            pre-carry: ~0           8322921849960486352
+# so ideally the code would respond to 8<14 and add 1 to the ~0, producing the correct result
+# this happens on the first iteration. it's allocated 3 limbs total.
+# 0: ~0 ~0 8322921849960486352
+# 1: ~0  0 8322921849960486352
+# however it does not detect that 0 < ~0 to increment the next one.
+# i think ref's indexing needs to be adjusted to compare correctly here.
+# or the data's.
