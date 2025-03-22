@@ -74,9 +74,9 @@ class NDBigInt:
         size = x._data.shape[axis]
         copy = True
         slices = [slice(None)] * axis + [None,...]
-        slices[axis] = slice(0,None,2); slices_A = slices
-        slices[axis] = slice(0,-1,2); slices_A_one_less = slices
-        slices[axis] = slice(1,None,2); slices_B = slices
+        slices[axis] = slice(0,None,2); slices_A = tuple(slices)
+        slices[axis] = slice(0,-1,2); slices_A_one_less = tuple(slices)
+        slices[axis] = slice(1,None,2); slices_B = tuple(slices)
         while size > 1:
             y = x[slices_B]
             x = NDBigInt(x._data[slices_A], copy=copy)
@@ -88,7 +88,7 @@ class NDBigInt:
             size = x._data.shape[axis]
         if not keepdims:
             slices[axis] = 0
-            return x[slices]
+            return x[tuple(slices)]
         else:
             return x
     def __iadd__(x, y):
@@ -104,7 +104,7 @@ class NDBigInt:
             # nails might work better for this case
             y = NDBigInt(y, copy=True)
 
-        x._data += y._data
+        x._data[...,:alloc] += y._data[...,:alloc]
         # in cases of overflow, the sum is less than the addend
         # if the end limb overflows then another is needed
         if xp.any(x._data[...,limbs-1] < y._data[...,limbs-1-1]):
@@ -134,19 +134,19 @@ class NDBigInt:
         return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
     def __ne__(x, y):
         return x.xp.all(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
-    def _alloc(self, limbs):
-        old_limbs = self._data.shape[-1]
-        if old_limbs < limbs:
-            xp = self.xp
-            new_data = xp.empty([*self._data.shape[:-1], limbs], dtype=xp.uint64)
-            new_data[...,:old_limbs] = self._data[...,:old_limbs]
-            # sign extension
-            #new_data[self._data[...,-1]>=UINT64_SIGN,old_limbs:] = UINT64_MAX
-            new_data[...,old_limbs:] = (xp.astype(self._data[...,old_limbs-1], xp.int64, copy=False) >> 63)[...,None]
+    def _alloc(self, alloc):
+        old_alloc = self._data.shape[-1]
+        if old_alloc < alloc:
+            new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
+            new_data[...,:old_alloc] = self._data[...,:old_alloc]
             self._data = new_data
         else:
-            assert self._limbs <= limbs
-            #self._data = self._data[...,:limbs]
+            assert self._limbs <= alloc
+            #self._data = self._data[...,:alloc]
+        if alloc > self._limbs:
+            # sign extension
+            #new_data[self._data[...,-1]>=UINT64_SIGN,old_alloc:] = UINT64_MAX
+            self._data[...,old_alloc:] = (self.xp.astype(self._data[...,old_alloc-1], xp.int64, copy=False) >> 63)[...,None]
     def __int__(self):
         xp = self.xp
         accum = int(xp.astype(self._data[...,-1], xp.int64, copy=False))
@@ -195,7 +195,7 @@ if __name__ == '__main__':
     np.random.seed(0)
     ars = [
         NDBigInt(xp.asarray(np.random.randint(0,1<<64,[64,64,64], dtype=np.uint64)))
-        for idx in range(2)
+        for idx in range(3)
     ]
     ar = NDBigInt(ars[0], copy=True)
 
@@ -213,3 +213,9 @@ if __name__ == '__main__':
     ar -= ars[1]
     assert int(ar[0,0,0]) == int(ars[0][0,0,0])
     assert xp.all(ar == ars[0])
+    ar += ars[2]
+    sum1 = ar.sum(axis=0)
+    sum2 = ars[0].sum(axis=0)
+    assert int(sum2[0,0]) == sum([int(ars[0][idx,0,0]) for idx in range(ars[0].shape[0])])
+    sum2 += ars[2].sum(axis=0)
+    assert xp.all(sum1 == sum2)
