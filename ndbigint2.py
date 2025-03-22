@@ -25,7 +25,7 @@ def may_share_memory_numpy(a, b):
 def _may_share_memory(xp, a, b):
     try:
         return may_share_memory_numpy(a._array, b._array)
-    except Exception as e:
+    except AttributeError as e:
         raise Exception("implement _may_share_memory", e)
 
 
@@ -73,25 +73,22 @@ class NDBigInt:
         xp = x.xp
         size = x._data.shape[axis]
         copy = True
-        slices = [slice(None)] * axis + [None,...]
-        slices[axis] = slice(0,None,2); slices_A = tuple(slices)
-        slices[axis] = slice(-1); slices_one_less = tuple(slices)
-        slices[axis] = slice(1,None,2); slices_B = tuple(slices)
+        preceding_axes = [slice(None)] * (axis - 1)
         while size > 1:
-            y = x[slices_B]
+            midsize = size//2
+            y = x[*preceding_axes,:midsize,...]
             if copy:
-                x = NDBigInt(x[slices_A], copy=True)
+                x = NDBigInt(x[*preceding_axes,midsize:,...], copy=True)
                 copy = False
             else:
-                x = x[slices_A]
+                x = x[*preceding_axes,midsize:,...]
             if size % 2:
-                x[slices_one_less] += y
+                x[*preceding_axes,:-1,...] += y
             else:
                 x += y
             size = x._data.shape[axis]
         if not keepdims:
-            slices[axis] = 0
-            return x[tuple(slices)]
+            return x[*preceding_axes,0,...]
         else:
             return x
     def __iadd__(x, y):
