@@ -75,16 +75,19 @@ class NDBigInt:
         copy = True
         slices = [slice(None)] * axis + [None,...]
         slices[axis] = slice(0,None,2); slices_A = tuple(slices)
-        slices[axis] = slice(0,-1,2); slices_A_one_less = tuple(slices)
+        slices[axis] = slice(-1); slices_one_less = tuple(slices)
         slices[axis] = slice(1,None,2); slices_B = tuple(slices)
         while size > 1:
             y = x[slices_B]
-            x = NDBigInt(x._data[slices_A], copy=copy)
-            copy = False
-            if size % 2:
-                x[slices_A_one_less] += y
+            if copy:
+                x = NDBigInt(x[slices_A], copy=True)
+                copy = False
             else:
-                x[slices_A] += y
+                x = x[slices_A]
+            if size % 2:
+                x[slices_one_less] += y
+            else:
+                x += y
             size = x._data.shape[axis]
         if not keepdims:
             slices[axis] = 0
