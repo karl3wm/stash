@@ -30,7 +30,7 @@ def _may_share_memory(xp, a, b):
 
 
 class NDBigInt:
-    def __init__(self, data, *, _xp=None, copy=None):
+    def __init__(self, data, *, _xp=None, copy=None, alloc=None):
         if type(data) is NDBigInt:
             xp = self.xp = data.xp
             self._data = xp.asarray(data._data, copy=copy)
@@ -43,6 +43,8 @@ class NDBigInt:
                 raise TypeError(data.dtype)
             self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
             self._limbs = 1
+        if alloc is not None:
+            self._alloc(alloc)
     @property
     def limbs(self):
         return self._limbs
@@ -126,7 +128,7 @@ class NDBigInt:
         x._data[...,:alloc] += y._data[...,:alloc]
         # in cases of overflow, the sum is less than the addend
         # if the end limb overflows then another is needed
-        if xp.any(x._data[...,limbs-1] < y._data[...,limbs-1-1]):
+        if xp.any(x._data[...,limbs-1] < y._data[...,limbs-1]):
             limbs = alloc
         # if a limb is all 0xf, as for negative numbers, there will be multiple chained overflows
         ref = y._data
@@ -139,7 +141,9 @@ class NDBigInt:
             off += 1
             x._data[...,off:limbs] += ref
         signed_x = xp.astype(x._data, xp.int64, copy=False)
+        # sign extend, set limbs
         # probably efficiency improvements exist
+        x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
         while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
             limbs -= 1
         x._limbs = limbs
@@ -221,7 +225,7 @@ class NDBigInt:
 if __name__ == '__main__':
     import array_api_strict as xp
 
-    assert int(NDBigInt(xp.asarray(-6532100632237123854)) + NDBigInt(xp.asarray(7958265450555812818))) == 1426164818318688964
+    assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) + NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == 1426164818318688964
 
     import numpy as np
     np.random.seed(0)
