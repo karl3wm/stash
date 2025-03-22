@@ -1,16 +1,27 @@
 
 class NDBigInt:
-    def __init__(self, data):
+    def __init__(self, data, *, _expandshift=True, _xp=None):
         if type(data) is NDBigInt:
             self._data = data._data
             self.xp = data.xp
         else:
-            xp = self.xp = data.__array_namespace__()
+            if _xp is None:
+                _xp = data.__array_namespace__()
+            xp = self.xp = _xp
             # the initial data must already be an ndarray of integers
             if not xp.isdtype(data.dtype, 'integral'):
                 raise TypeError(data.dtype)
             self._data = xp.astype(data[...,None], xp.uint64)
-            self._expandshift()
+            if _expandshift:
+                self._expandshift()
+    def broadcast_arrays(*arrays):
+        xp = arrays[0].xp
+        depth = max([ary._data.shape[-1] for ary in arrays])
+        [ary._reserve(depth) for ary in arrays]
+        return [
+            NDBigInt(ary, _expandshift=False)
+            for ary in xp.broadcast_arrays(*[ary._data for ary in arrays])
+        ]
     def _reserve(self, new_words):
         old_words = self._data.shape[-1]
         if old_words < new_words:
@@ -43,7 +54,7 @@ class NDBigInt:
     def __int__(self):
         accum = 0
         for item in self.xp.unstack(self._data[...,::-1]):
-            accum <<= 64
+            accum <<= 63
             accum += int(item)
         return accum
     def __getitem__(self, slices):
