@@ -78,16 +78,16 @@ class NDBigInt:
         x._reserve(alloc)
         y._reserve(alloc)
         y_limbs = y._data[...,:limbs]
-        x_limbs = x._data[...,:limbs]
         x._data[...,:limbs] += y_limbs
         # in cases of overflow, the sum is less than the addend
         # if a value all 0xf, as for negative numbers, there will be multiple chained overflows
-        raise NotImplementedError('fix logic in carry code')
+        ref = y_limbs[...,:-1]
         while True:
-            oflows = x._data[...,:limbs-1] < y_limbs
+            oflows = x._data[...,:limbs-1] < ref
             if not xp.any(oflows):
                 break
-            x._data[...,1:limbs] += xp.astype(oflows, xp.uint8, copy=False)
+            ref = xp.astype(oflows, xp.uint8, copy=False)
+            x._data[...,1:limbs] += ref
         # if the last bit overflows, we don't want to change the sign of the result, and need to increase the limbs.
         end_oflows = x._data[...,limbs-1] < y_limbs[...,-1]
         if xp.any(end_oflows):
@@ -104,15 +104,16 @@ class NDBigInt:
         x._reserve(alloc)
         y._reserve(alloc)
         y_limbs = y._data[...,:limbs]
-        x_limbs = x._data[...,:limbs]
         x._data[...,:limbs] -= y_limbs
         # in cases of overflow, the sum is less than the addend
         # if a value all 0xf, as for negative numbers, there will be multiple chained overflows
+        ref = y_limbs[...,:-1]
         while True:
-            oflows = x._data[...,:limbs-1] < y_limbs[...,:-1]
+            oflows = x._data[...,:limbs-1] < ref
             if not xp.any(oflows):
                 break
-            x._data[...,1:limbs] -= xp.astype(oflows, xp.uint8, copy=False)
+            ref = xp.astype(oflows, xp.uint8, copy=False)
+            x._data[...,1:limbs] -= ref
         # if the last bit overflows, we don't want to change the sign of the result, and need to increase the limbs.
         end_oflows = x._data[...,limbs-1] < y_limbs[...,-1]
         if xp.any(end_oflows):
@@ -178,7 +179,7 @@ class NDBigInt:
 if __name__ == '__main__':
     import array_api_strict as xp
     import numpy as np
-    np.random.seed(0)
+    np.random.seed(1)
     ars = [
         NDBigInt(xp.asarray(np.random.randint(0,1<<64,[64,64,64], dtype=np.uint64)))
         for idx in range(64)
