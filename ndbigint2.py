@@ -74,23 +74,24 @@ class NDBigInt:
         size = x._data.shape[axis]
         copy = True
         preceding_axes = [slice(None)] * (axis - 1)
+
         while size > 1:
             midsize = size//2
-            y = x[*preceding_axes,:midsize,...]
-            if copy:
-                x = NDBigInt(x[*preceding_axes,midsize:,...], copy=True)
-                copy = False
-            else:
-                x = x[*preceding_axes,midsize:,...]
+            y = x
             if size % 2:
-                x[*preceding_axes,:-1,...] += y
+                x = NDBigInt(y[*preceding_axes,:midsize+1,...], copy=copy)
+                x._data[*preceding_axes,midsize,...] = 0
             else:
-                x += y
+                x = NDBigInt(y[*preceding_axes,:midsize,...], copy=copy)
+            copy = False
+            x += y[*preceding_axes,midsize:size,...]
             size = x._data.shape[axis]
-        if not keepdims:
-            return x[*preceding_axes,0,...]
-        else:
+
+        if keepdims:
             return x
+        else:
+            return x[*preceding_axes,0,...]
+
     def __iadd__(x, y):
         xp = x.xp
         limbs = max(x.limbs, y.limbs)
@@ -194,7 +195,7 @@ if __name__ == '__main__':
     import numpy as np
     np.random.seed(0)
     ars = [
-        NDBigInt(xp.asarray(np.random.randint(0,1<<64,[64,64,64], dtype=np.uint64)))
+        NDBigInt(xp.asarray(np.random.randint(0,1<<64,[63,65,67], dtype=np.uint64)))
         for idx in range(3)
     ]
     ar = NDBigInt(ars[0], copy=True)
