@@ -74,9 +74,13 @@ class NDBigInt:
         if axis is None:
             return x.reshape([-1]).sum(keepdims = keepdims)
 
-        # it might be possible to vectorize this more, but it seems a little
-        # complex. each approach i found still involved treating the data in
-        # groups, simply larger ones, so i just wrote the group code to start
+        # i think the immediately clearest way to vectorize this would be to
+        # assert that the dimension size fits within 32 bits (<sqrt(64bits))
+        # and then sum the high and low 32 bit parts separately each in
+        # 64-bit storage.
+        # it could generalize to sizes > 32 bits with smaller groups
+        # but that seems unneeded here, if this code were ever used for such
+        # a gigantic context there would be more devs
 
         xp = x.xp
         size = x._data.shape[axis]
@@ -202,7 +206,8 @@ class NDBigInt:
         #    # a positive summation overflowed into the sign bit
         #    limbs = alloc
         # if a limb is all 0xf, as for negative numbers, there will be multiple chained overflows
-        ref = y._data
+        # one way to reduce the iterations here would be to amortize over many operations by maintaining overflow data, looping until it is 0 when __int__ is called
+        ref = y._data[...,:limbs]
         off = 0
         while True:
             oflows = x._data[...,off:limbs-1] < ref[...,:-1] # this also does not detect when the final limb has overflowed into the sign bit
@@ -350,7 +355,7 @@ class NDBigInt:
     def __eq__(x, y):
         return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
     def __ne__(x, y):
-        return x.xp.all(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
+        return x.xp.any(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
     def _alloc(self, alloc):
         old_alloc = self._data.shape[-1]
         if old_alloc < alloc:
