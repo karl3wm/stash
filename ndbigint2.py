@@ -41,8 +41,14 @@ class NDBigInt:
             xp = self.xp = _xp
             if not xp.isdtype(data.dtype, 'integral'):
                 raise TypeError(data.dtype)
-            self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
-            self._limbs = 1
+            if xp.isdtype(data.dtype, xp.uint64) and xp.any(data >= 0x8000000000000000):
+                self._data = xp.empty([*data.shape, 2], dtype=xp.uint64)
+                self._data[...,0] = data
+                self._data[...,1] = 0
+                self._limbs = 2
+            else:
+                self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
+                self._limbs = 1
         if alloc is not None:
             self._alloc(alloc)
     @property
@@ -209,8 +215,6 @@ class NDBigInt:
         # we want to sign extend only the numbers that have mismatching addend sign bits
         # that is, the numbers where the new sign mismatches that in the additional limb
 
-        signed_x = xp.astype(x._data, xp.int64, copy=False)
-
         # how to calculate that. 3 parts .. y's top 65 bits, x's top 64 bits, and x's 65th bit the new sign bit
         # - if bit 65 == bits 0-64, leave them as is
         # - if bit 65 != bits 0-64, sign extend. if so, isn't that the same as inverting?
@@ -319,9 +323,14 @@ class NDBigInt:
 
         # sign extend, set limbs
         # probably efficiency improvements exist
-        #x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
-        while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
-            limbs -= 1
+
+        if xp.any((x._data[...,limbs]) ^ (x._data[...,limbs-1]>>63)):
+            limbs += 1
+        else:
+            signed_x = xp.astype(x._data, xp.int64, copy=False)
+            #x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
+            while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
+                limbs -= 1
         x._limbs = limbs
         #actual_sum = x._tolist(); assert expected_sum == actual_sum
         return x
@@ -357,8 +366,9 @@ class NDBigInt:
             self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
     def __int__(self):
         xp = self.xp
-        accum = int(xp.astype(self._data[...,-1], xp.int64, copy=False))
-        for item in xp.unstack(self._data[...,:-1][...,::-1]):
+        signlimb = self.limbs - 1
+        accum = int(xp.astype(self._data[...,signlimb], xp.int64, copy=False))
+        for item in xp.unstack(self._data[...,:signlimb][...,::-1]):
             accum <<= 64
             accum += int(item)
         return accum
