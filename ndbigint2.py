@@ -153,7 +153,11 @@ class NDBigInt:
         # sign extend
 
         # there's likely a way to simplify this.
-        # "why is this needed? what case is addition with sign extension not covering?"
+        # one idea: "why is this needed? what case is addition with sign extension not covering?"
+                # this is covering when positive numbers overflow into appearing negative without overflowing their limbs
+                # one could also look into expanding the limb incrementation condition instead.
+                # although there is also some interest in removing all branching from the function
+                    # but wouldn't positive overflow be handled by including the extra limb, to hold the real sign?
 
         # ysign x0sign  x1sign choice x0^x1 y^x0 y^x1  y^x0^x1  x0==x1  y==x0  y==x1   ((x0==x1)&(y^x0))^y
         # 0     0       0      0      0     0    0     0        1       1      1
@@ -173,14 +177,20 @@ class NDBigInt:
         result_sign &= (x0_sign == x1_sign)
         result_sign ^= y_sign
         x._data[...,limbs:] = xp.astype(-xp.astype(result_sign[...,None], xp.int64, copy=False), xp.uint64, copy=False)
+        #x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
+
+        # i want to compare only the 63rd bit
+        # i'm interested in (a&63rd)==(b&63rd)
+        # which i guess is ~(a&63rd)^(b&63rd)
+        # given xor is bitwise
+        # we can do (a^b)&63rd == 0
 
         # set limbs
         # probably efficiency improvements exist
-        if xp.any((x._data[...,limbs]) ^ (x._data[...,limbs-1]>>63)):
+        if xp.any((x._data[...,limbs] ^ x._data[...,limbs-1]) & 0x80000000_00000000):
             limbs += 1
         else:
             signed_x = xp.astype(x._data, xp.int64, copy=False)
-            #x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
             while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
                 limbs -= 1
         x._limbs = limbs
