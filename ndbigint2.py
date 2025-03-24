@@ -196,6 +196,134 @@ class NDBigInt:
         x._limbs = limbs
         #actual_sum = x._tolist(); assert expected_sum == actual_sum
         return x
+    def __mul__(x, y):
+        xp = x.xp
+        #if _may_share_memory(xp, x._data, y._data):
+        #    raise NotImplementedError('in place overlapping multiply')
+
+        # how do you multiply
+        #   a b
+        # x c d
+        # -----
+        # each digit of one is multiplied by each digit of the other and summed, including all the places after it
+        # so 101 x 100 is 10100
+        # and 101 x 101 is 10100 + 101 = 11001
+
+        # so for us, each limb is a digit. well, each half-limb, as then we get full overflow information.
+        # so the first halflimb of x is multiplied by every halflimb of y, and the second halflimb ..
+        # if we have two arrays, is there a way to multiply them like digits without iterating through all of one?
+        # likely it means allocating a lot of space to make a triangular matrix containing shifts or rolls
+
+        # this would be possible by repeating the vector into a square matrix, and then viewing the underlying data with a column size off by 1 and a row size off by 1 in the other direction.
+
+        # turns [1,2,3,4] into [[1,2,3],[0,1,2],[0,0,1]]
+        #xp.triu(
+        #    xp.reshape(
+        #        xp.tile(ary, (ary.shape[-1]-1,)),
+        #        [ary.shape[-1], ary.shape[-1]-1]
+        #    )
+        #) 
+
+        # so that would properly expand one side i think, if we had an extra limb we could ignore
+        # since lower magnitude is first in this representation
+        # would need to turn it into half-limbs and possibly adjust the reshaping regarding halflimbs
+
+            # you could freely treat lo and hi separately so long as they are eventually summed together
+
+         # it's not the right representation. The pattern is that each one multiplies each other one, in the position that is the sum
+         # of the positions of the factors.
+         # so if the output is already positioned for summing, it's more like:
+         # [1,2,3,4,0,0] 
+         # [0,1,2,3,4,0]
+         # [0,0,1,2,3,4]
+         #   ok so you'd zero-pad it first and then do the tiling and reshaping without the triu.
+        # [1,2,3,4,0,0] x [A,B,C,D,0,0]
+        # [0,1,2,3,4,0] x [A,B,C,D,0,0]
+        # there's no A x 2 yet
+        # [1,2,3,4,0,0] x [0,A,B,C,D,0]
+        # now it's there ...
+        # so that's a second (third?) dimension of expansion
+        # [1,2,3] x [A,B,C,0]
+        # [1,2,3] x [0,A,B,C]
+        # doesn't look right. let's write them all for an example
+        #        1  2  3
+        #     x  A  B  C
+        #    -----------
+        #       1C 2C 3C
+        #    1B 2B 3B  0
+        # 1A 2A 3A
+        # so
+        # [_, _, C, C, C] x [_, _, 1, 2, 3]
+        # [_, B, B, B, _] x [_, 1, 2, 3, _]
+        # [A, A, A, _, _] x [1, 2, 3, _, _]
+        # looks similar to a meshgrid
+        # A1, A2+B1, A3+B2+C1, B3+C2, C3
+        # i'll reverse the indexing since we have high indices as high amount
+        # i'll also reverse the order for the same reason
+        # A 1 -> x2 y2
+        # B 2 -> x1 y1
+        # C 3 -> x0 y0
+        # x[0]*y[0], x[1]*y[0] + x[0]*y[1], x[2]*y[0] + x[1]*y[1] + x[0]*y[2], x[2]*y[1] + x[1]*y[2], x[2]*y[2]
+        #                                 , dot(x[::-1], y)                  ,
+        # this looks like the result of a matmul of diagonalized matrices like above.
+        # instead of a matmul, the output could be written as n dot products of uncopied data, where n is limbs*2
+        # 
+        # it would likely be useful to write both.
+
+        # [ x[0]*y[0], x[1]*y[0] + x[0]*y[1], x[2]*y[0] + x[1]*y[1] + x[0]*y[2], x[2]*y[1] + x[1]*y[2], x[2]*y[2] ]
+        #                          [ y[0], y[1], y[2],    0,    0 ]
+        # = [ x[0], x[1], x[2] ] X [    0, y[0], y[1], y[2],    0 ]
+        #                          [    0,    0, y[0], y[1], y[2] ]
+        #                          [ x[0], x[1], x[2],    0,    0 ]
+        # = [ y[0], y[1], y[2] ] X [    0, x[0], x[1], x[2],    0 ]
+        #                          [    0,    0, x[0], x[1], x[2] ]
+        # = [ dot(x[:1], y[0::-1]), dot(x[:2], y[1::-1]), dot(x[:], y[::-1]), dot(x[1:], y[:0:-1]), dot(x[2:], y[:1:-1]) ]
+
+        # = sum([
+        #   [x[0]*y[0], x[0]*y[1], x[0]*y[2],         0,         0],
+        #   [        0, x[1]*y[0], x[1]*y[1], x[1]*y[2],         0],
+        #   [        0,         0, x[2]*y[0], x[2]*y[1], x[2]*y[2]],
+        # ], axis=-2) 
+
+        # = sum([
+        #   [x[0]*y[0],         0,         0],
+        #   [x[0]*y[1], x[1]*y[0],         0],
+        #   [x[0]*y[2], x[1]*y[1], x[2]*y[0]],
+        #   [        0, x[1]*y[2], x[2]*y[1]],
+        #   [        0,         0, x[2]*y[2]],
+        # ], axis=-1) 
+
+        # so if we unshear that last matrix it looks like this (with zero padding that would produce the shear below):
+
+        #   [x[0]*y[0], x[1]*y[0], x[2]*y[0]],
+        #   [x[0]*y[1], x[1]*y[1], x[2]*y[1]],
+        #   [x[0]*y[2], x[1]*y[2], x[2]*y[2]],
+        #   [        0,         0,    unused],
+        #   [        0,         0,    unused],
+        #   [        0,         0,    unused],
+
+        # that's an ... outer product ...?
+
+            # xp.linalg.outer unsure if it takes batched input though
+
+
+        alloc = max(x._limbs, y._limbs) + 1
+        x._alloc(alloc)
+        y._alloc(alloc)
+
+        x_lo = x & 0x00000000ffffffff
+        y_lo = y & 0x00000000ffffffff       
+
+        # 
+        #x_lo_ex = 
+        #    y_lo[...,None] *
+        #    xp.triu(xp.reshape(xp.tile(x_lo[...,:alloc], (alloc-1,)), [*x_lo._data.shape[:-1], alloc, alloc-1]))
+
+        #x_hi = x >> 32
+        #y_hi = y >> 32
+        raise NotImplementedError()
+        
+
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
         x += y
