@@ -10,12 +10,14 @@
 def may_share_memory_torch(a, b):
     if a.device != b.device:
         return False
-    astore = a.storage()
-    bstore = b.storage()
-    astart = astore.data_ptr()
-    bstart = bstore.data_ptr()
-    aend = astart + astore.nbytes()
-    bend = bstart + bstore.nbytes()
+    astart = a.data_ptr()
+    bstart = a.data_ptr()
+    astride = a.stride()
+    bstride = b.stride()
+    astride, adim = max([[astride[idx],idx] for idx in range(len(astride))])
+    bstride, bdim = max([[bstride[idx],idx] for idx in range(len(bstride))])
+    aend = astart + a.size(adim) * astride * a.element_size()
+    bend = bstart + b.size(bdim) * bstride * b.element_size()
     return aend > bstart and bend > astart
 
 def may_share_memory_numpy(a, b):
