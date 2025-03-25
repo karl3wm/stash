@@ -32,7 +32,7 @@ def _may_share_memory(xp, a, b):
 
 
 class NDBigInt:
-    def __init__(self, data, *, _xp=None, copy=None, alloc=None):
+    def __init__(self, data, *, copy=None, alloc=None, _xp=None):
         if type(data) is NDBigInt:
             xp = self.xp = data.xp
             self._data = xp.asarray(data._data, copy=copy)
@@ -203,89 +203,18 @@ class NDBigInt:
         #if _may_share_memory(xp, x._data, y._data):
         #    raise NotImplementedError('in place overlapping multiply')
 
-        # how do you multiply
-        #   a b
-        # x c d
-        # -----
-        # each digit of one is multiplied by each digit of the other and summed, including all the places after it
-        # so 101 x 100 is 10100
-        # and 101 x 101 is 10100 + 101 = 11001
+        # I considered this as whole words at first, then implemented it with
+        # halflimbs as two separate blocks.  However, they are likely unifiable
+        # with a slightly different matrix reshaping.
+        # This would give the intermediate values a more intuitive arrangement
+        # during debugging or future changes.
+        # Additionally the two matmuls currently present could possibly be
+        # unified into one somehow.
 
-        # so for us, each limb is a digit. well, each half-limb, as then we get full overflow information.
-        # so the first halflimb of x is multiplied by every halflimb of y, and the second halflimb ..
-        # if we have two arrays, is there a way to multiply them like digits without iterating through all of one?
-        # likely it means allocating a lot of space to make a triangular matrix containing shifts or rolls
-
-        # this would be possible by repeating the vector into a square matrix, and then viewing the underlying data with a column size off by 1 and a row size off by 1 in the other direction.
-
-        # turns [1,2,3,4] into [[1,2,3],[0,1,2],[0,0,1]]
-        #xp.triu(
-        #    xp.reshape(
-        #        xp.tile(ary, (ary.shape[-1]-1,)),
-        #        [ary.shape[-1], ary.shape[-1]-1]
-        #    )
-        #) 
-
-        # so that would properly expand one side i think, if we had an extra limb we could ignore
-        # since lower magnitude is first in this representation
-        # would need to turn it into half-limbs and possibly adjust the reshaping regarding halflimbs
-
-            # you could freely treat lo and hi separately so long as they are eventually summed together
-
-         # it's not the right representation. The pattern is that each one multiplies each other one, in the position that is the sum
-         # of the positions of the factors.
-         # so if the output is already positioned for summing, it's more like:
-         # [1,2,3,4,0,0] 
-         # [0,1,2,3,4,0]
-         # [0,0,1,2,3,4]
-         #   ok so you'd zero-pad it first and then do the tiling and reshaping without the triu.
-        # [1,2,3,4,0,0] x [A,B,C,D,0,0]
-        # [0,1,2,3,4,0] x [A,B,C,D,0,0]
-        # there's no A x 2 yet
-        # [1,2,3,4,0,0] x [0,A,B,C,D,0]
-        # now it's there ...
-        # so that's a second (third?) dimension of expansion
-        # [1,2,3] x [A,B,C,0]
-        # [1,2,3] x [0,A,B,C]
-        # doesn't look right. let's write them all for an example
-        #        1  2  3
-        #     x  A  B  C
-        #    -----------
-        #       1C 2C 3C
-        #    1B 2B 3B  0
-        # 1A 2A 3A
-        # so
-        # [_, _, C, C, C] x [_, _, 1, 2, 3]
-        # [_, B, B, B, _] x [_, 1, 2, 3, _]
-        # [A, A, A, _, _] x [1, 2, 3, _, _]
-        # looks similar to a meshgrid
-        # A1, A2+B1, A3+B2+C1, B3+C2, C3
-        # i'll reverse the indexing since we have high indices as high amount
-        # i'll also reverse the order for the same reason
-        # A 1 -> x2 y2
-        # B 2 -> x1 y1
-        # C 3 -> x0 y0
-        # x[0]*y[0], x[1]*y[0] + x[0]*y[1], x[2]*y[0] + x[1]*y[1] + x[0]*y[2], x[2]*y[1] + x[1]*y[2], x[2]*y[2]
-        #                                 , dot(x[::-1], y)                  ,
-        # this looks like the result of a matmul of diagonalized matrices like above.
-        # instead of a matmul, the output could be written as n dot products of uncopied data, where n is limbs*2
-        # 
-        # it would likely be useful to write both.
-
-        # [ x[0]*y[0], x[1]*y[0] + x[0]*y[1], x[2]*y[0] + x[1]*y[1] + x[0]*y[2], x[2]*y[1] + x[1]*y[2], x[2]*y[2] ]
-        #                          [ y[0], y[1], y[2],    0,    0 ]
-        # = [ x[0], x[1], x[2] ] X [    0, y[0], y[1], y[2],    0 ]
-        #                          [    0,    0, y[0], y[1], y[2] ]
-        #                          [ x[0], x[1], x[2],    0,    0 ]
-        # = [ y[0], y[1], y[2] ] X [    0, x[0], x[1], x[2],    0 ]
-        #                          [    0,    0, x[0], x[1], x[2] ]
-        # = [ dot(x[:1], y[0::-1]), dot(x[:2], y[1::-1]), dot(x[:], y[::-1]), dot(x[1:], y[:0:-1]), dot(x[2:], y[:1:-1]) ]
-
-        # = sum([
-        #   [x[0]*y[0], x[0]*y[1], x[0]*y[2],         0,         0],
-        #   [        0, x[1]*y[0], x[1]*y[1], x[1]*y[2],         0],
-        #   [        0,         0, x[2]*y[0], x[2]*y[1], x[2]*y[2]],
-        # ], axis=-2) 
+        xlimbs = x._limbs
+        ylimbs = y._limbs
+        x, y = xp.broadcast_arrays(x._data, y._data)
+        shape = x.shape[:-1]
 
         # = sum([
         #   [x[0]*y[0],         0,         0],
@@ -293,38 +222,57 @@ class NDBigInt:
         #   [x[0]*y[2], x[1]*y[1], x[2]*y[0]],
         #   [        0, x[1]*y[2], x[2]*y[1]],
         #   [        0,         0, x[2]*y[2]],
-        # ], axis=-1) 
+        # ], axis=-1)
 
-        # so if we unshear that last matrix it looks like this (with zero padding that would produce the shear below):
+        # = sum([
+        #   [x[0]*y[0], x[0]*y[1], x[0]*y[2],         0,         0],
+        #   [        0, x[1]*y[0], x[1]*y[1], x[1]*y[2],         0],
+        #   [        0,         0, x[2]*y[0], x[2]*y[1], x[2]*y[2]],
+        # ], axis=-2)
 
-        #   [x[0]*y[0], x[1]*y[0], x[2]*y[0]],
-        #   [x[0]*y[1], x[1]*y[1], x[2]*y[1]],
-        #   [x[0]*y[2], x[1]*y[2], x[2]*y[2]],
-        #   [        0,         0,    unused],
-        #   [        0,         0,    unused],
-        #   [        0,         0,    unused],
+        final_limbs = (ylimbs + 1) * 2
 
-        # that's an ... outer product ...?
+        prod = xp.empty(
+            [*shape, 2, xlimbs, final_limbs + 1]
+            dtype = xp.uint64
+        )
 
-            # xp.linalg.outer unsure if it takes batched input though
+        # construct the outer products of halflimbs masked to collect overflow
+        # and carry information and padded with zeros
 
+        # low halflimbs can be multiplied in-place
+        prod[..., 0, :, :ylimbs] = (
+                (x._data[...,:,None] & 0x00000000ffffffff)
+                @
+                (y._data[...,None,:] & 0x00000000ffffffff)
+        )
+        prod[..., 0, :, ylimbs:] = 0
 
-        alloc = max(x._limbs, y._limbs) + 1
-        x._alloc(alloc)
-        y._alloc(alloc)
+        # high halflimbs have an extra 1<<32 factor and end up 1 limb higher
+        # than they started
+        prod[..., 1, :, 0] = 0
+        prod[..., 1, :, 1:ylimbs+1] = (
+                (x._data[...,:,None] >> 32)
+                @
+                (y._data[...,None,:] >> 32)
+        )
+        prod[..., 1, :, ylimbs+1:] = 0
 
-        x_lo = x & 0x00000000ffffffff
-        y_lo = y & 0x00000000ffffffff       
+        # reshape with the padded dimension 1 size smaller (final_limbs)
+        # to give the outer product the slided offsetting for the sum
+        prod = xp.reshape(
+            xp.reshape(
+                prod,
+                [*shape, 2, -1]
+            )[..., 2, :xlimbs * final_limbs],
+            [*shape, 2 * xlimbs, final_limbs]
+        )
 
-        # 
-        #x_lo_ex = 
-        #    y_lo[...,None] *
-        #    xp.triu(xp.reshape(xp.tile(x_lo[...,:alloc], (alloc-1,)), [*x_lo._data.shape[:-1], alloc, alloc-1]))
+        # then the product might be a bigint sum of prod along -2
 
-        #x_hi = x >> 32
-        #y_hi = y >> 32
+        #prod = NDBigInt(prod
+
         raise NotImplementedError()
-        
 
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
@@ -343,7 +291,7 @@ class NDBigInt:
         return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
     def __ne__(x, y):
         return x.xp.any(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
-    def _alloc(self, alloc):
+    def _alloc(self, alloc, _sign_extend=True):
         old_alloc = self._data.shape[-1]
         if old_alloc < alloc:
             new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
@@ -352,7 +300,7 @@ class NDBigInt:
         else:
             assert self._limbs <= alloc
             #self._data = self._data[...,:alloc]
-        if alloc > self._limbs:
+        if alloc > self._limbs and _sign_extend:
             # sign extension
             #new_data[self._data[...,-1]>=UINT64_SIGN,old_alloc:] = UINT64_MAX
             self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
