@@ -32,7 +32,7 @@ def _may_share_memory(xp, a, b):
 
 
 class NDBigInt:
-    def __init__(self, data, *, copy=None, alloc=None, _xp=None):
+    def __init__(self, data, *, copy=None, alloc=None, _xp=None, _limbs=None):
         if type(data) is NDBigInt:
             xp = self.xp = data.xp
             self._data = xp.asarray(data._data, copy=copy)
@@ -43,7 +43,11 @@ class NDBigInt:
             xp = self.xp = _xp
             if not xp.isdtype(data.dtype, 'integral'):
                 raise TypeError(data.dtype)
-            if xp.isdtype(data.dtype, xp.uint64) and xp.any(data >= 0x8000000000000000):
+            if _limbs is not None:
+                assert _limbs <= data.shape[-1]
+                self._data = data
+                self._limbs = _limbs
+            elif xp.isdtype(data.dtype, xp.uint64) and xp.any(data >= 0x8000000000000000):
                 self._data = xp.empty([*data.shape, 2], dtype=xp.uint64)
                 self._data[...,0] = data
                 self._data[...,1] = 0
@@ -208,12 +212,14 @@ class NDBigInt:
         # with a slightly different matrix reshaping.
         # This would give the intermediate values a more intuitive arrangement
         # during debugging or future changes.
+        # The arithmetic may also be incorrect until these are considered together.
         # Additionally the two matmuls currently present could possibly be
         # unified into one somehow.
 
         xlimbs = x._limbs
         ylimbs = y._limbs
-        x, y = xp.broadcast_arrays(x._data, y._data)
+        x = x._data
+        y = y._data
         shape = x.shape[:-1]
 
         # = sum([
@@ -233,7 +239,7 @@ class NDBigInt:
         final_limbs = (ylimbs + 1) * 2
 
         prod = xp.empty(
-            [*shape, 2, xlimbs, final_limbs + 1]
+            [*shape, 2, xlimbs, final_limbs + 1],
             dtype = xp.uint64
         )
 
@@ -242,9 +248,9 @@ class NDBigInt:
 
         # low halflimbs can be multiplied in-place
         prod[..., 0, :, :ylimbs] = (
-                (x._data[...,:,None] & 0x00000000ffffffff)
+                (x[...,:xlimbs,None] & 0x00000000ffffffff)
                 @
-                (y._data[...,None,:] & 0x00000000ffffffff)
+                (y[...,None,:ylimbs] & 0x00000000ffffffff)
         )
         prod[..., 0, :, ylimbs:] = 0
 
@@ -252,9 +258,9 @@ class NDBigInt:
         # than they started
         prod[..., 1, :, 0] = 0
         prod[..., 1, :, 1:ylimbs+1] = (
-                (x._data[...,:,None] >> 32)
+                (x[...,:xlimbs,None] >> 32)
                 @
-                (y._data[...,None,:] >> 32)
+                (y[...,None,:ylimbs] >> 32)
         )
         prod[..., 1, :, ylimbs+1:] = 0
 
@@ -264,15 +270,15 @@ class NDBigInt:
             xp.reshape(
                 prod,
                 [*shape, 2, -1]
-            )[..., 2, :xlimbs * final_limbs],
+            )[..., :2, :xlimbs * final_limbs],
             [*shape, 2 * xlimbs, final_limbs]
         )
 
         # then the product might be a bigint sum of prod along -2
 
-        #prod = NDBigInt(prod
-
+        prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
         raise NotImplementedError()
+        return prod.sum(axis=-2)
 
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
@@ -353,6 +359,14 @@ if __name__ == '__main__':
     assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) + NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == 1426164818318688964
     assert int(NDBigInt(xp.asarray(7692698082559361259)) + NDBigInt(xp.asarray(7692698082559361259))) == 15385396165118722518
     assert int(NDBigInt(xp.asarray(15761168082059424201)) + NDBigInt(xp.asarray(8937115293130262283))) == 24698283375189686484
+
+    assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(4))) == 12
+    assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259))) == 59177603789412473292821695494070065081
+    assert int(NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 140859376303769844698647197831087710883
+    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
+    assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
+    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
+    assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
 
     import numpy as np
     np.random.seed(0)
