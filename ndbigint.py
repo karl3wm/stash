@@ -208,14 +208,15 @@ class NDBigInt:
         #if _may_share_memory(xp, x._data, y._data):
         #    raise NotImplementedError('in place overlapping multiply')
 
-        # I considered this as whole words at first, then implemented it with
-        # halflimbs as two separate blocks.  However, they are likely unifiable
-        # with a slightly different matrix reshaping.
-        # This would give the intermediate values a more intuitive arrangement
-        # during debugging or future changes.
-        # The arithmetic may also be incorrect until these are considered together.
-        # Additionally the two matmuls currently present could possibly be
-        # unified into one somehow.
+        if x._data[-1] & 0x800000000000 or y._data[-1] & 0x800000000000:
+            raise NotImplementedError('product of negative')
+
+        # This approach uses masking and shifting which could be reduced if the
+        # data were directly cast from uint64 to uint32 without loss of
+        # elements. A function like _may_share_memory could be added to do this
+        # if one doesn't exist, with fallback to the below code.
+
+        # The matmuls present in this could likely be unified somehow.
 
         xlimbs = x._limbs
         ylimbs = y._limbs
@@ -223,131 +224,20 @@ class NDBigInt:
         y = y._data
         shape = x.shape[:-1]
 
-        # = sum([
-        #   [x[0]*y[0],         0,         0],
-        #   [x[0]*y[1], x[1]*y[0],         0],
-        #   [x[0]*y[2], x[1]*y[1], x[2]*y[0]],
-        #   [        0, x[1]*y[2], x[2]*y[1]],
-        #   [        0,         0, x[2]*y[2]],
-        # ], axis=-1)
-
-        # = sum([
-        #   [x[0]*y[0], x[0]*y[1], x[0]*y[2],         0,         0],
-        #   [        0, x[1]*y[0], x[1]*y[1], x[1]*y[2],         0],
-        #   [        0,         0, x[2]*y[0], x[2]*y[1], x[2]*y[2]],
-        # ], axis=-2)
-
-        # so with taking the mod we could consider
-        # [x[0], x[2]], [y[0], y[2]]
-        # separately from
-        # [x[1], x[3]], [y[1], y[3]]
-        # which at first leaves out every product between them.
-
-        # sum([
-        #   [x[0]*y[0], x[0]*y[1], x[0]*y[2], x[0]*y[3],         0,         0,         0],
-        #   [        0, x[1]*y[0], x[1]*y[1], x[1]*y[2], x[1]*y[3],         0,         0],
-        #   [        0,         0, x[2]*y[0], x[2]*y[1], x[2]*y[2], x[2]*y[3],         0],
-        #   [        0,         0,         0, x[3]*y[0], x[3]*y[1], x[3]*y[2], x[3]*y[3]],
-        # ], axis=-2)
-
-        # low halflimbs only
-        # sum([
-        #   [x[0]*y[0],            x[0]*y[2],                    0,                    0],
-        #   [        0,            x[2]*y[0],            x[2]*y[2],                    0],
-        # ], axis=-2)
-        # high halflimbs only
-        # sum([
-        #   [        0,            x[1]*y[1],            x[1]*y[3],                    0],
-        #   [        0,                    0,            x[3]*y[1],            x[3]*y[3]],
-        # ], axis=-2)
-        # the even columns are missing
-        # sum([
-        #   [           x[0]*y[1],            x[0]*y[3],                    0,          ],
-        #   [           x[1]*y[0],            x[1]*y[2],                    0,          ],
-        #   [                   0,            x[2]*y[1],            x[2]*y[3],          ],
-        #   [                   0,            x[3]*y[0],            x[3]*y[2],          ],
-        # ], axis=-2)
-
+        # halflimb product that would sum along axis -2:
         # sum([
         #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],             0,             0,             0],
         #   [            0, xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],             0,             0],
         #   [            0,             0, xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],             0],
         #   [            0,             0,             0, xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1]],
         # ], axis=-2)
+        # is this outer product with stride reduced by one:
+        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],             0,             0,             0,             0],
+        #   [xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],             0,             0,             0,             0],
+        #   [xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],             0,             0,             0,             0],
+        #   [xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1],        unused,        unused,        unused,        unused],
 
-        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],             0,             0,             0],
-        #   [xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],             0,             0,             0],
-        #   [xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],             0,             0,             0],
-        #   [xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1],             0,             0,             0],
-
-        #   [ xlo[0] ]
-        # = [ xhi[0] ] x [ ylo[0], yhi[0], ylo[1], yhi[1], 0, 0, 0, 0 ]
-        #   [ xlo[1] ]
-        #   [ xhi[1] ]
-
-        # can interweave xlo and xhi either before or after the matmul
-        # doing before might mean using column and row vectors twice as large
-        # however, the sum is not quite the same, because the odd columns are halflimbs
-        # to make yhi and xhi retain overflow, they'll be shifted down by half a limb
-        # so xhi*xhi is correctly one limb higher than xlo*xlo .. i think
-        # but xlo*xhi is half a limb higher and has its lower half in one limb and its upper half in the other
-
-        #   [xl[0]*yl[0],           0, xl[0]*yl[1],           0,           0,           0,           0],
-        #   [          0, xl[0]*yh[0],           0, xl[0]*yh[1],           0,           0,           0],
-        #   [          0,           0, xh[0]*yh[0],           0, xh[0]*yh[1],           0,           0],
-        #   [          0, xh[0]*yl[0],           0, xh[0]*yl[1],           0,           0,           0],
-        #   [          0,           0, xl[1]*yl[0],           0, xl[1]*yl[1],           0,           0],
-        #   [          0,           0,           0, xl[1]*yh[0],           0, xl[1]*yh[1],           0],
-        #   [          0,           0,           0,           0, xh[1]*yh[0],           0, xh[1]*yh[1]],
-        #   [          0,           0,           0, xh[1]*yl[0],           0, xh[1]*yl[1],           0],
-
-        #   [xl[0]*yl[0]            0, xl[0]*yl[1]            0,                        0,                        0],
-        #   [             xl[0]*yh[0],              xl[0]*yh[1],                        0,                        0],
-        #   [                       0, xh[0]*yh[0]            0, xh[0]*yh[1]             ,                        0],
-        #   [             xh[0]*yl[0],              xh[0]*yl[1],                        0,                        0],
-        #   [                       0, xl[1]*yl[0]            0, xl[1]*yl[1]             ,                        0],
-        #   [                       0,              xl[1]*yh[0],              xl[1]*yh[1],                        0],
-        #   [                       0,                        0, xh[1]*yh[0]             , xh[1]*yh[1]             ],
-        #   [                       0,              xh[1]*yl[0],              xh[1]*yl[1],                        0],
-
-        #   [xl[0]*yl[0]                 ,   xl[0]*yl[1]                          ,                                       0,                        0],
-        #   [         ((xl[0]*yh[0])<<32),                     ((xl[0]*yh[1])<<32),                                       0,                        0],
-        #   [                            , ((xl[0]*yh[0])>>32)                    , ((xl[0]*yh[1])>>32)                    ,                        0],
-        #   [                           0,   xh[0]*yh[0]                          ,   xh[0]*yh[1]                          ,                        0],
-        #   [         ((xh[0]*yl[0])<<32),                     ((xh[0]*yl[1])<<32),                                       0,                        0],
-        #   [                            , ((xh[0]*yl[0])>>32)                    , ((xh[0]*yl[1])>>32)                    ,                        0],
-        #   [                           0,   xl[1]*yl[0]                          ,   xl[1]*yl[1]                          ,                        0],
-        #   [                           0,                     ((xl[1]*yh[0])<<32),                     ((xl[1]*yh[1])<<32),                        0],
-        #   [                           0,                                       0, ((xl[1]*yh[0])>>32)                    , ((xl[1]*yh[1])>>32)     ],
-        #   [                           0,                                       0,   xh[1]*yh[0]                          ,   xh[1]*yh[1]           ],
-        #   [                           0,                     ((xh[1]*yl[0])<<32),                     ((xh[1]*yl[1])<<32),                        0],
-        #   [                           0,                                       0, ((xh[1]*yl[0])>>32)                    , ((xh[1]*yl[1])>>32)     ],
-
-        #   [xl[0]*yl[0]                 ,   xl[0]*yl[1]                          ,                                       0,                        0],
-        #   [         ((xl[0]*yh[0])<<32), ((xl[0]*yh[0])>>32)|((xl[0]*yh[1])<<32), ((xl[0]*yh[1])>>32)                    ,                        0],
-        #   [         ((xh[0]*yl[0])<<32), ((xh[0]*yl[0])>>32)|((xh[0]*yl[1])<<32), ((xh[0]*yl[1])>>32)                    ,                        0],
-        #   [                           0,   xh[0]*yh[0]                          ,   xh[0]*yh[1]                          ,                        0],
-        #   [                           0,   xl[1]*yl[0]                          ,   xl[1]*yl[1]                          ,                        0],
-        #   [                           0,                     ((xl[1]*yh[0])<<32), ((xl[1]*yh[0])>>32)|((xl[1]*yh[1])<<32), ((xl[1]*yh[1])>>32)     ],
-        #   [                           0,                     ((xh[1]*yl[0])<<32), ((xh[1]*yl[0])>>32)|((xh[1]*yl[1])<<32), ((xh[1]*yl[1])>>32)     ],
-        #   [                           0,                                       0,   xh[1]*yh[0]                          ,   xh[1]*yh[1]           ],
-
-        #   [xl[0]*yl[0]                 ,   xl[0]*yl[1]                          ,                                       0,                        0],
-        #   [         ((xl[0]*yh[0])<<32),                     ((xl[0]*yh[1])<<32),                                       0,                        0],
-        #   [                            , ((xl[0]*yh[0])>>32)                    , ((xl[0]*yh[1])>>32)                    ,                        0],
-        #
-        #   [                           0,   xh[0]*yh[0]                          ,   xh[0]*yh[1]                          ,                        0],
-        #   [         ((xh[0]*yl[0])<<32),                     ((xh[0]*yl[1])<<32),                                       0,                        0],
-        #   [                            , ((xh[0]*yl[0])>>32)                    , ((xh[0]*yl[1])>>32)                    ,                        0],
-        #
-        #   [                           0,   xl[1]*yl[0]                          ,   xl[1]*yl[1]                          ,                        0],
-        #   [                           0,                     ((xl[1]*yh[0])<<32),                     ((xl[1]*yh[1])<<32),                        0],
-        #   [                           0,                                       0, ((xl[1]*yh[0])>>32)                    , ((xl[1]*yh[1])>>32)     ],
-        #
-        #   [                           0,                                       0,   xh[1]*yh[0]                          ,   xh[1]*yh[1]           ],
-        #   [                           0,                     ((xh[1]*yl[0])<<32),                     ((xh[1]*yl[1])<<32),                        0],
-        #   [                           0,                                       0, ((xh[1]*yl[0])>>32)                    , ((xh[1]*yl[1])>>32)     ],
-
+        #  whole limb products that would sum along axis -2:
         #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,                   0,                   0],
         #    [                  0,   xl[1]*yl[0]      ,   xl[1]*yl[1]      ,                   0]],
         #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),                   0,                   0],
@@ -360,7 +250,7 @@ class NDBigInt:
         #    [                  0,                   0, ((xl[1]*yh[0])>>32), ((xl[1]*yh[1])>>32)]],
         #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),                   0],
         #    [                  0,                   0, ((xh[1]*yl[0])>>32), ((xh[1]*yl[1])>>32)]],
-
+        # come from these outer products:
         #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,                   0,                   0,                   0],
         #    [  xl[1]*yl[0]      ,   xl[1]*yl[1]      ,                   0,              unused,              unused]],
         #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),                   0,                   0,                   0],
@@ -376,8 +266,7 @@ class NDBigInt:
 
         # so the whole product-sum parts can be expressed as a restrided ndarray with an extra dimension 6 large
         # or two extra dimensions of shape (2,3)
-        # where the 6 components are: 
-                # personal note: i guess it seems a little helpful to keep stray spaces in, i think they've been happening for quite some time
+        # where the 6 components are:
         # 1/1,1 low halflimb products
         # 2/1,2 high halflimb of low*high halflimb products
         # 3/1,3 high halflimb of high*low halflimb products
@@ -385,31 +274,20 @@ class NDBigInt:
         # 5/2.2 low halflimb of low*high halflimb products (offset by 1 limb)
         # 6/2.3 low halflimb of high*low halflimb products (offset by 1 limb)
 
-        # there are 4 limb counts
-        # - the number of limbs not filled with zeros
-        # - the number of limbs used to construct the restrided matrices
-        # - the number of limbs in the final restrided matrices
-        # - the number of limbs possibly containing the final result including summation overflow
-
-        # the above final example has 2 initial limbs ie 4 initial halflimbs
-        # and the restrided construction uses 5 limbs total.
-        # but farther up the restrided result has multiple addends in column 4 so also would have a maximum limb count of 5 to include overflow
-        # the restrided construction would then need 6 limbs if this overflow were pre-allocated.
-
-        final_limbs = xlimbs + ylimbs # add + 1 to preallocate for overflow bits in final summation
+        final_limbs = xlimbs + ylimbs # add another + 1 to preallocate for overflow bits in final summation
 
         prod = xp.empty(
-            [*shape, 2, 3, xlimbs, final_limbs + 1],
+            [*shape, 2, 3, xlimbs, final_limbs + 1], # this + 1 is to allow for restriding to offset the values prior to taking their sum.
             dtype = xp.uint64
         )
 
         # construct the outer products of halflimbs masked and shifted to
         # collect overflow and carry information and padded with zeros
 
-        x_lo = x[...,:xlimbs] & 0x00000000ffffffff
-        y_lo = y[...,:ylimbs] & 0x00000000ffffffff
         #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False)
         #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False)
+        x_lo = x[...,:xlimbs] & 0x00000000ffffffff
+        y_lo = y[...,:ylimbs] & 0x00000000ffffffff
         x_hi = x[...,:xlimbs] >> 32
         y_hi = y[...,:ylimbs] >> 32
         # low halflimb products are in-place.
@@ -525,10 +403,12 @@ if __name__ == '__main__':
     assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(4))) == 12
     assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259))) == 59177603789412473292821695494070065081
     assert int(NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 140859376303769844698647197831087710883
-    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
-    assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
-    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
-    assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
+    # it might make sense to review potential simplification of sign extension in __iadd__ before implementing multiplication of negative
+    # numbers, so as to consider whether what is learned is helpful when representing negative products.
+    #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
+    #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
+    #assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
+    #assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
 
     import numpy as np
     np.random.seed(0)
