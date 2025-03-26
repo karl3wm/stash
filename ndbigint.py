@@ -97,12 +97,13 @@ class NDBigInt:
             midsize = size//2
             y = x
             if size % 2:
-                x = NDBigInt(y[*preceding_axes,:midsize+1,...], copy=copy)
-                x._data[*preceding_axes,midsize,...] = 0
+                x = NDBigInt(y[*preceding_axes,:midsize+1,...]._data, copy=copy, _xp=xp, _limbs=y._limbs)
+                x_sum = x[*preceding_axes,:midsize,...]
+                x_sum += y[*preceding_axes,midsize+1:,...]
             else:
-                x = NDBigInt(y[*preceding_axes,:midsize,...], copy=copy)
+                x = NDBigInt(y[*preceding_axes,:midsize,...]._data, copy=copy, _xp=xp, _limbs=y._limbs)
+                x += y[*preceding_axes,midsize:,...]
             copy = False
-            x += y[*preceding_axes,midsize:size,...]
             size = x._data.shape[axis]
 
         if keepdims:
@@ -407,6 +408,8 @@ class NDBigInt:
 
         x_lo = x[...,:xlimbs] & 0x00000000ffffffff
         y_lo = y[...,:ylimbs] & 0x00000000ffffffff
+        #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False)
+        #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False)
         x_hi = x[...,:xlimbs] >> 32
         y_hi = y[...,:ylimbs] >> 32
         # low halflimb products are in-place.
@@ -421,7 +424,7 @@ class NDBigInt:
         prod[..., 1, 0, :, 1:ylimbs+1] = x_hi[...,None] @ y_hi[...,None,:]
         # zeros elsewhere
         prod[..., 0, :, :, ylimbs:] = 0
-        prod[..., 1, :, :, 1] = 0
+        prod[..., 1, :, :, 0] = 0
         prod[..., 1, :, :, ylimbs+1:] = 0
 
         # reshape with the padded dimension 1 size smaller (final_limbs)
@@ -437,7 +440,6 @@ class NDBigInt:
         # then the product might be a bigint sum of prod along -2
 
         prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
-        raise NotImplementedError()
         return prod.sum(axis=-2)
 
     def __isub__(x, y):
