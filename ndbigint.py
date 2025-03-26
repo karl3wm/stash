@@ -7,6 +7,9 @@
 #  the first dimension might be more computationally efficient and would simply
 #    mean permuting axes to broadcast consistently.
 
+# next step: walk through a __mul__ between negative values and compare the calculation
+# to normal integer multiplication
+
 def may_share_memory_torch(a, b):
     if a.device != b.device:
         return False
@@ -81,8 +84,10 @@ class NDBigInt:
         xp = x.xp
         x._data = xp.reshape(x._data, [*shape, x.limbs], **kwparams)
         return x
-    def sum(x, *, axis = None, keepdims = False):
-        x._alloc(x._limbs + 1)
+    def sum(x, *, axis = None, keepdims = False, _trunc = None):
+        if _trunc is None:
+            _trunc = x._limbs + 1
+            x._alloc(x._limbs + 1)
         if axis is None:
             return x.reshape([-1]).sum(keepdims = keepdims)
 
@@ -105,17 +110,17 @@ class NDBigInt:
             if size % 2:
                 x = NDBigInt(y[*preceding_axes,:midsize+1,...]._data, copy=copy, _xp=xp, _limbs=y._limbs)
                 x_sum = x[*preceding_axes,:midsize,...]
-                x_sum += y[*preceding_axes,midsize+1:,...]
+                x_sum = x_sum.__iadd__(y[*preceding_axes,midsize+1:,...], _trunc=_trunc)
             else:
                 x = NDBigInt(y[*preceding_axes,:midsize,...]._data, copy=copy, _xp=xp, _limbs=y._limbs)
-                x += y[*preceding_axes,midsize:,...]
+                x = x.__iadd__(y[*preceding_axes,midsize:,...], _trunc=_trunc)
             copy = False
             size = x._data.shape[axis]
 
-        if keepdims:
-            return x
-        else:
-            return x[*preceding_axes,0,...]
+        if not keepdims:
+            x = x[*preceding_axes,0,...]
+        x._view = None
+        return x
 
     def _tolist(*xs, visitor = None):
         if visitor is None:
@@ -132,13 +137,17 @@ class NDBigInt:
         else:
             return visitor(*xs)
 
-    def __iadd__(x, y):
+    def __iadd__(x, y, _trunc=None):
         xp = x.xp
         #x_list = x._tolist()
         #y_list = y._tolist()
         #expected_sum = x._tolist(y, visitor=lambda x, y: int(x) + int(y))
-        limbs = max(x.limbs, y.limbs)
-        alloc = limbs + 1
+        if _trunc is None:
+            limbs = max(x.limbs, y.limbs)
+            _trunc = limbs + 1
+        else:
+            limbs = _trunc
+        alloc = _trunc
         x._alloc(alloc)
         y._alloc(alloc)
 
@@ -152,58 +161,29 @@ class NDBigInt:
         # in cases of overflow, the sum is less than the addend
 
         # if a limb is all 0xf, as for negative numbers, there will be multiple chained overflows
-        # one way to reduce the iterations here could be to amortize over many operations by maintaining overflow data, looping until it is 0 when __int__ is called
-        ref = y._data[...,:limbs]
+        # one way to reduce the iterations here could be to persist overflow data
+        ref = y._data[...,:alloc]
         off = 0
         while True:
-            oflows = x._data[...,off:limbs-1] < ref[...,:-1] # this also does not detect when the final limb has overflowed into the sign bit
+            oflows = x._data[...,off:alloc-1] < ref[...,:-1]
             if not xp.any(oflows):
                 break
             ref = xp.astype(oflows, xp.uint8, copy=False)
             off += 1
-            x._data[...,off:limbs] += ref
+            x._data[...,off:alloc] += ref
 
-        # sign extend
-
-        # there's likely a way to simplify this.
-        # one idea: "why is this needed? what case is addition with sign extension not covering?"
-                # this is covering when positive numbers overflow into appearing negative without overflowing their limbs
-                # one could also look into expanding the limb incrementation condition instead.
-                # although there is also some interest in removing all branching from the function
-                    # but wouldn't positive overflow be handled by including the extra limb, to hold the real sign?
-
-        # ysign x0sign  x1sign choice x0^x1 y^x0 y^x1  y^x0^x1  x0==x1  y==x0  y==x1   ((x0==x1)&(y^x0))^y
-        # 0     0       0      0      0     0    0     0        1       1      1
-        # 0     0       1      0      1     0    1     1        0       1      0
-        # 0     1       0      0.     1     1    0     1        0       0      1
-        # 0     1       1      1      0     1    1     0        1       0      0
-        # 1     0       0      0      0     1    1     1        1       0      0
-        # 1     0       1      1.     1     1    0     0        0       0      1
-        # 1     1       0      1      1     0    1     0        0       1      0
-        # 1     1       1      1      0     0    0     1        1       1      1
-
-        # note i was earlier using signed >> 63 to convert 1 bit to 64 bits
-        x0_sign = xp.astype(x._data[...,limbs], xp.bool, copy=False)
-        y_sign = xp.astype(y._data[...,limbs], xp.bool, copy=False)
-        result_sign = y_sign ^ x0_sign
-        x1_sign = x._data[...,limbs-1] >= 0x8000000000000000
-        result_sign &= (x0_sign == x1_sign)
-        result_sign ^= y_sign
-        x._data[...,limbs:] = xp.astype(-xp.astype(result_sign[...,None], xp.int64, copy=False), xp.uint64, copy=False)
-        #x._data[...,limbs:] = xp.astype(signed_x[...,limbs-1:limbs] >> 63, xp.uint64, copy=False)
-
-        # i want to compare only the 63rd bit
-        # i'm interested in (a&63rd)==(b&63rd)
-        # which i guess is ~(a&63rd)^(b&63rd)
-        # given xor is bitwise
-        # we can do (a^b)&63rd == 0
 
         # set limbs
         # probably efficiency improvements exist
-        if xp.any((x._data[...,limbs] ^ x._data[...,limbs-1]) & 0x80000000_00000000):
+        if alloc > limbs and xp.any((x._data[...,limbs] ^ x._data[...,limbs-1]) >= 0x80000000_00000000):
+            # (a&63rd)==(b&63rd) is ~(a&63rd)^(b&63rd) or (a^b)&63rd == 0 given xor is bitwise
+
+            # the extra limb's sign bit is needed
+            # this branch could likely be simplified away by starting with limbs = limbs + 1 and reducing it
             limbs += 1
         else:
-            signed_x = xp.astype(x._data, xp.int64, copy=False)
+            # this doesn't need to allocate an entire copy of the data here
+            signed_x = xp.astype(x._data, xp.int64)
             while limbs > 1 and xp.all(signed_x[...,limbs-1] == signed_x[...,limbs-2]>>63):
                 limbs -= 1
         x._limbs = limbs
@@ -224,8 +204,9 @@ class NDBigInt:
 
         # The matmuls present in this could likely be unified somehow.
 
-        xlimbs = x._limbs
-        ylimbs = y._limbs
+        limbs = x._limbs + y._limbs # assuming negative numbers present in both operands
+        x._alloc(limbs)
+        y._alloc(limbs)
         x = x._data
         y = y._data
         shape = x.shape[:-1]
@@ -280,51 +261,105 @@ class NDBigInt:
         # 5/2.2 low halflimb of low*high halflimb products (offset by 1 limb)
         # 6/2.3 low halflimb of high*low halflimb products (offset by 1 limb)
 
-        final_limbs = xlimbs + ylimbs # add another + 1 to preallocate for overflow bits in final summation
-
         prod = xp.empty(
-            [*shape, 2, 3, xlimbs, final_limbs + 1], # this + 1 is to allow for restriding to offset the values prior to taking their sum.
+            [*shape, 2, 3, limbs, limbs + 1], # this + 1 is to allow for restriding to offset the values prior to taking their sum.
             dtype = xp.uint64
         )
+
+
+        # something i might want to figure out for signed multiplication of 64 bit values is how to do signed multiplication of 2-bit values.
+        # -3 = 11 01
+        # -2 = 11 10
+        # -3 * -2 = 6 = 00 01 10
+        # 
+        #          11 11 01
+        #        x 11 11 10
+        #     -------------
+        #    11 11
+        #  1 11 11 1
+        # 11 11 11 11       # carry
+        #                
+        #          _0 _0 _0 # _1 _1 _1 x .. .. _0
+        #          1_ 1_ 1_ # _1 _1 _1 x .. .. 1_
+        #          0_ 0_ 0_ # 1_ 1_ 0_ x .. .. _0
+        #        1 _1 _0 _  # 1_ 1_ 0_ x .. .. 1_
+
+        #       _1 _1 _1    # _1 _1 _1 x .. _1 ..
+        #       1_ 1_ 1_    # _1 _1 _1 x .. 1_ ..
+        #       1_ 1_ 0_    # 1_ 1_ 0_ x .. _1 ..
+        #     1 _1 _0 _     # 1_ 1_ 0_ x .. 1_ ..
+
+        #    _1 _1 _1       # _1 _1 _1 x _1 .. ..
+        #    1_ 1_ 1_       # _1 _1 _1 x 1_ .. ..
+        #    1_ 1_ 0_       # 1_ 1_ 0_ x _1 .. ..
+        #  1 _1 _0 _        # 1_ 1_ j_ x 1_ .. ..
+        # ------------------
+        # 11 00 11 00 01 10
+
+        # 
+        #             11 01
+        #        x    11 10
+        #     -------------
+        #           
+        #       11 11       # carry
+        #                
+        #             _0 _0 #    _1 _1 x    .. _0
+        #             1_ 1_ #    _1 _1 x    .. 1_
+        #             0_ 0_ #    1_ 0_ x    .. _0
+        #           1 _0 _  #    1_ 0_ x    .. 1_
+
+        #          _1 _1    #    _1 _1 x    _1 ..
+        #          1_ 1_    #    _1 _1 x    1_ ..
+        #          1_ 0_    #    1_ 0_ x    _1 ..
+        #        1 _0 _     #    1_ 0_ x    1_ ..
+        # ------------------
+        #       10 11 01 10
+
+        # 3 2bits * 3 2bits -> 3 2bits
+        # 2 2bits * 2 2bits -> 2 2bits
+        # it looks negative values need to be sign extended to as far as the final product
+
 
         # construct the outer products of halflimbs masked and shifted to
         # collect overflow and carry information and padded with zeros
 
         #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False)
         #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False)
-        x_lo = x[...,:xlimbs] & 0x00000000ffffffff
-        y_lo = y[...,:ylimbs] & 0x00000000ffffffff
-        x_hi = x[...,:xlimbs] >> 32
-        y_hi = y[...,:ylimbs] >> 32
+        x_lo = x[...,:limbs] & 0x00000000ffffffff
+        y_lo = y[...,:limbs] & 0x00000000ffffffff
+        x_hi = x[...,:limbs] >> 32
+        y_hi = y[...,:limbs] >> 32
         # low halflimb products are in-place.
-        prod[..., 0, 0, :, :ylimbs] = x_lo[...,None] @ y_lo[...,None,:]
+        #if NDBigInt((xp.reshape(x[...,:limbs],-1)[0], xp.int64) < 0 and:
+        #    import pdb; pdb.set_trace()
+        prod[..., 0, 0, :, :limbs] = x_lo[...,None] @ y_lo[...,None,:]
         # low*high halflimb products are shifted up by a halflimb
-        prod[..., 0, 1, :, :ylimbs] = x_lo[...,None] @ y_hi[...,None,:]
-        prod[..., 0, 2, :, :ylimbs] = x_hi[...,None] @ y_lo[...,None,:]
-        prod[..., 1, 1:, :, 1:ylimbs+1] = prod[..., 0, 1:, :, :ylimbs]
+        prod[..., 0, 1, :, :limbs] = x_lo[...,None] @ y_hi[...,None,:]
+        prod[..., 0, 2, :, :limbs] = x_hi[...,None] @ y_lo[...,None,:]
+        prod[..., 1, 1:, :, 1:limbs+1] = prod[..., 0, 1:, :, :limbs]
         prod[..., 0, 1:, :, :] <<= 32
-        prod[..., 1, 1:, :, 1:ylimbs+1] >>= 32
+        prod[..., 1, 1:, :, 1:limbs+1] >>= 32
         # high halflimb products are shifted up a whole limb
-        prod[..., 1, 0, :, 1:ylimbs+1] = x_hi[...,None] @ y_hi[...,None,:]
-        # zeros elsewhere
-        prod[..., 0, :, :, ylimbs:] = 0
+        prod[..., 1, 0, :, 1:limbs+1] = x_hi[...,None] @ y_hi[...,None,:]
+        # zeros in the unused limbs
         prod[..., 1, :, :, 0] = 0
-        prod[..., 1, :, :, ylimbs+1:] = 0
+        prod[..., 0, :, :, limbs:] = 0
+        prod[..., 1, :, :, limbs+1:] = 0 # oops no-op ?
 
-        # reshape with the padded dimension 1 size smaller (final_limbs)
+        # reshape with the padded dimension 1 size smaller (limbs)
         # to give the outer product the slided offsetting for the sum
         prod = xp.reshape(
             xp.reshape(
                 prod,
                 [*shape, 6, -1]
-            )[..., :xlimbs * final_limbs],
-            [*shape, 6 * xlimbs, final_limbs]
+            )[..., :limbs * limbs],
+            [*shape, 6 * limbs, limbs]
         )
 
         # then the product might be a bigint sum of prod along -2
 
-        prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
-        return prod.sum(axis=-2)
+        prod = NDBigInt(prod, _xp=xp, _limbs=limbs)
+        return prod.sum(axis=-2, _trunc=limbs)
 
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
@@ -343,20 +378,6 @@ class NDBigInt:
         return x.xp.all(x._data[...,:x._limbs] == y._data[...,:y._limbs], axis=-1)
     def __ne__(x, y):
         return x.xp.any(x._data[...,:x._limbs] != y._data[...,:y._limbs], axis=-1)
-    def _alloc(self, alloc, _sign_extend=True):
-        old_alloc = self._data.shape[-1]
-        if old_alloc < alloc:
-            assert not self._view and "resizing through view might indicate implementation of view functionality in ndarray.py and using it for resizing here"
-            new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
-            new_data[...,:old_alloc] = self._data[...,:old_alloc]
-            self._data = new_data
-        else:
-            assert self._limbs <= alloc
-            #self._data = self._data[...,:alloc]
-        if alloc > self._limbs and _sign_extend:
-            # sign extension
-            #new_data[self._data[...,-1]>=UINT64_SIGN,old_alloc:] = UINT64_MAX
-            self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
     def __int__(self):
         xp = self.xp
         signlimb = self.limbs - 1
@@ -394,6 +415,35 @@ class NDBigInt:
                     break
                 idx[off] = 0
                 off -= 1
+    def _alloc(self, alloc, _sign_extend=True):
+        old_alloc = self._data.shape[-1]
+        if old_alloc < alloc:
+            assert not self._view and "resizing through view might indicate implementation of view functionality in ndarray.py and using it for resizing here"
+            new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
+            new_data[...,:old_alloc] = self._data[...,:old_alloc]
+            self._data = new_data
+        else:
+            assert self._limbs <= alloc
+            #self._data = self._data[...,:alloc]
+        if alloc > self._limbs and _sign_extend:
+            self._sign_extend(self.xp, self._data, old_alloc)
+            #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
+    @staticmethod
+    def _sign_extend(xp, data, start_limb):
+        #new_data[self._data[...,-1]>=UINT64_SIGN,old_alloc:] = UINT64_MAX
+        #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
+        #signed_data = xp.astype(data, xp.int64, copy=False) # always makes copy when dtypes differ
+
+        signs = xp.astype(data[..., start_limb-1, None], xp.int64) # reduce new allocation size to 1 limb
+        signs >>= 63
+        data[..., start_limb:] = signs
+
+        # haven't found an approach yet to do it without allocating new data
+        #block = data[..., start_limb:]
+        #assert _may_share_memory(block, data)
+        #block[:] = data[..., start_limb-1,None]
+        #block &= 0x8000000000000000
+        #block[block] = 0xffffffffffffffff # here i think i incorrectly use an int as a bool
 
 if __name__ == '__main__':
     import array_api_strict as xp
