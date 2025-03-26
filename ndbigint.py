@@ -45,16 +45,21 @@ class NDBigInt:
                 raise TypeError(data.dtype)
             if _limbs is not None:
                 assert _limbs <= data.shape[-1]
-                self._data = data
+                self._data = xp.asarray(data, copy=copy)
                 self._limbs = _limbs
             elif xp.isdtype(data.dtype, xp.uint64) and xp.any(data >= 0x8000000000000000):
-                self._data = xp.empty([*data.shape, 2], dtype=xp.uint64)
+                copy = True
+                if alloc is None or alloc < 2:
+                    alloc = 2
+                self._data = xp.empty([*data.shape, alloc], dtype=xp.uint64)
                 self._data[...,0] = data
                 self._data[...,1] = 0
                 self._limbs = 2
+                alloc = None
             else:
                 self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
                 self._limbs = 1
+        self._view = copy is False
         if alloc is not None:
             self._alloc(alloc)
     @property
@@ -77,6 +82,7 @@ class NDBigInt:
         x._data = xp.reshape(x._data, [*shape, x.limbs], **kwparams)
         return x
     def sum(x, *, axis = None, keepdims = False):
+        x._alloc(x._limbs + 1)
         if axis is None:
             return x.reshape([-1]).sum(keepdims = keepdims)
 
@@ -208,7 +214,7 @@ class NDBigInt:
         #if _may_share_memory(xp, x._data, y._data):
         #    raise NotImplementedError('in place overlapping multiply')
 
-        if x._data[-1] & 0x800000000000 or y._data[-1] & 0x800000000000:
+        if x._data[-1] & 0x8000000000000000 or y._data[-1] & 0x8000000000000000:
             raise NotImplementedError('product of negative')
 
         # This approach uses masking and shifting which could be reduced if the
@@ -340,6 +346,7 @@ class NDBigInt:
     def _alloc(self, alloc, _sign_extend=True):
         old_alloc = self._data.shape[-1]
         if old_alloc < alloc:
+            assert not self._view and "resizing through view might indicate implementation of view functionality in ndarray.py and using it for resizing here"
             new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
             new_data[...,:old_alloc] = self._data[...,:old_alloc]
             self._data = new_data
@@ -359,12 +366,7 @@ class NDBigInt:
             accum += int(item)
         return accum
     def __getitem__(self, slices):
-        item = NDBigInt(self, copy=False)
-        if type(slices) is tuple:
-            item._data = item._data[*slices,:]
-        else:
-            item._data = item._data[slices,:]
-        return item
+        return NDBigInt(self._data[*slices, :], copy=False, _xp=self.xp, _limbs=self._limbs)
     def __str__(self):
         xp = self.xp
         shape = self._data.shape
@@ -403,6 +405,8 @@ if __name__ == '__main__':
     assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(4))) == 12
     assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259))) == 59177603789412473292821695494070065081
     assert int(NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 140859376303769844698647197831087710883
+    assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259)) + NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 200036980093182317991468893325157775964
+    assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 8335720360928247907391432232202715839389412648863354718493794045983121976523
     # it might make sense to review potential simplification of sign extension in __iadd__ before implementing multiplication of negative
     # numbers, so as to consider whether what is learned is helpful when representing negative products.
     #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
