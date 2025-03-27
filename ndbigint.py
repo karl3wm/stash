@@ -57,6 +57,38 @@
 #  bounds correctly when merging the concepts of limb count, analogous to
 #  an internal failure to remember and include concepts of setting them)
 
+# ok now i tried something that sums to [12, -7] instead of [12, -1...]
+# before restriding:
+#      [[[[18446744043644780556, 0, 0]],
+#        [[         12884901888, 0, 0]],
+#        [[         17179869184, 0, 0]]],
+#       [[[                   0, 18446744065119617025, 0]],
+#        [[                   0, 4294967292, 0]],
+#        [[                   0, 4294967291, 0]]]] 
+# after restriding:
+#      [[18446744043644780556, 0],
+#       [         12884901888, 0],
+#       [         17179869184, 0],
+#       [                   0, 18446744065119617025],
+#       [                   0, 4294967292],
+#       [                   0, 4294967291]]
+# if we review the example with 2 bits, all the columns of products are needed to produce the correct columns of sums.
+# this is likely why 3 words of input are needed in both parts to produce 3 words of correct output.
+# here, we have 2 words of desired output, so we need 2 full columns of sums.
+
+# i think it makes sense to try including the full extended inputs and then applying xp.triu to the output
+# because it seems like it would be reliable, and there's no correct output yet
+#       some interest in thinking briefly if there is an easy solution that doesn't involve copying all the data we avoiding copying or iterating
+#        the worry is that the problem could stem from an intrinsic need for both zero and nonzero triangularly-bounded data
+#        it's notable the existing restriding does produce that, a triangular bound to zero and nonzero data.
+#        if we understood what is needed more clearly, maybe there would a restriding solution.
+#           well, i guess the worry is that there is a triangular bound to _what data is used_ -- however, it is pretty likely that this data is _constant_.
+#           an alternative solution is to increase the width of the intermediate product. so that we can still get wrapped zeros and also include more data.
+#           this would solve it but would simply hide the inefficiency of producing and discarding data.
+#           a more advanced solution might be to recognize that these products of sign extensions are constant values, and fill them in without calculating.
+#       it would be nice to clearly and correctly understand what data is needed, and what its values are.
+#       [guessing the triu solution would work ...]
+
 def may_share_memory_torch(a, b):
     if a.device != b.device:
         return False
@@ -238,12 +270,6 @@ class NDBigInt:
         return x
     def __mul__(x, y):
         xp = x.xp
-        #if _may_share_memory(xp, x._data, y._data):
-        #    raise NotImplementedError('in place overlapping multiply')
-
-        if x._data[-1] & 0x8000000000000000 or y._data[-1] & 0x8000000000000000:
-            import pdb; pdb.set_trace()
-            #raise NotImplementedError('product of negative')
 
         # This approach uses masking and shifting which could be reduced if the
         # data were directly cast from uint64 to uint32 without loss of
@@ -252,9 +278,11 @@ class NDBigInt:
 
         # The matmuls present in this could likely be unified somehow.
 
-        limbs = x._limbs + y._limbs # assuming negative numbers present in both operands
-        x._alloc(limbs)
-        y._alloc(limbs)
+        final_limbs = x._limbs + y._limbs # add + 1 to preallocate for overflow bits in final summation
+        x._alloc(final_limbs) # unneccessary, simplifies work
+        y._alloc(final_limbs) # unneccessary, simplifies work
+        xlimbs = x._limbs
+        ylimbs = y._limbs
         x = x._data
         y = y._data
         shape = x.shape[:-1]
@@ -310,7 +338,7 @@ class NDBigInt:
         # 6/2.3 low halflimb of high*low halflimb products (offset by 1 limb)
 
         prod = xp.empty(
-            [*shape, 2, 3, limbs, limbs + 1], # this + 1 is to allow for restriding to offset the values prior to taking their sum.
+            [*shape, 2, 3, xlimbs, final_limbs + 1], # this + 1 is to allow for restriding to offset the values prior to taking their sum.
             dtype = xp.uint64
         )
 
@@ -373,41 +401,41 @@ class NDBigInt:
 
         #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False)
         #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False)
-        x_lo = x[...,:limbs] & 0x00000000ffffffff
-        y_lo = y[...,:limbs] & 0x00000000ffffffff
-        x_hi = x[...,:limbs] >> 32
-        y_hi = y[...,:limbs] >> 32
+        x_lo = x[...,:xlimbs] & 0x00000000ffffffff
+        y_lo = y[...,:ylimbs] & 0x00000000ffffffff
+        x_hi = x[...,:xlimbs] >> 32
+        y_hi = y[...,:ylimbs] >> 32
         # low halflimb products are in-place.
-        #if NDBigInt((xp.reshape(x[...,:limbs],-1)[0], xp.int64) < 0 and:
-        #    import pdb; pdb.set_trace()
-        prod[..., 0, 0, :, :limbs] = x_lo[...,None] @ y_lo[...,None,:]
+        prod[..., 0, 0, :, :ylimbs] = x_lo[...,None] @ y_lo[...,None,:]
         # low*high halflimb products are shifted up by a halflimb
-        prod[..., 0, 1, :, :limbs] = x_lo[...,None] @ y_hi[...,None,:]
-        prod[..., 0, 2, :, :limbs] = x_hi[...,None] @ y_lo[...,None,:]
-        prod[..., 1, 1:, :, 1:limbs+1] = prod[..., 0, 1:, :, :limbs]
-        prod[..., 0, 1:, :, :] <<= 32
-        prod[..., 1, 1:, :, 1:limbs+1] >>= 32
+        prod[..., 0, 1, :, :ylimbs] = x_lo[...,None] @ y_hi[...,None,:]
+        prod[..., 0, 2, :, :ylimbs] = x_hi[...,None] @ y_lo[...,None,:]
+        prod[..., 1, 1:, :, 1:ylimbs+1] = prod[..., 0, 1:, :, :ylimbs]
+        prod[..., 0, 1:, :, :ylimbs] <<= 32
+        prod[..., 1, 1:, :, 1:ylimbs+1] >>= 32
         # high halflimb products are shifted up a whole limb
-        prod[..., 1, 0, :, 1:limbs+1] = x_hi[...,None] @ y_hi[...,None,:]
-        # zeros in the unused limbs
+        prod[..., 1, 0, :, 1:ylimbs+1] = x_hi[...,None] @ y_hi[...,None,:]
+        # zeros elsewhere
+        prod[..., 0, :, :, ylimbs:] = 0
         prod[..., 1, :, :, 0] = 0
-        prod[..., 0, :, :, limbs:] = 0
-        prod[..., 1, :, :, limbs+1:] = 0 # oops no-op ?
+        prod[..., 1, :, :, ylimbs+1:] = 0 # still a no-op (oops?)
 
-        # reshape with the padded dimension 1 size smaller (limbs)
+        # reshape with the padded dimension 1 size smaller (final_limbs)
         # to give the outer product the slided offsetting for the sum
         prod = xp.reshape(
             xp.reshape(
                 prod,
                 [*shape, 6, -1]
-            )[..., :limbs * limbs],
-            [*shape, 6 * limbs, limbs]
+            )[..., :xlimbs * final_limbs],
+            [*shape, 6 * xlimbs, final_limbs]
         )
+
+        prod = xp.reshape(xp.triu(xp.reshape(prod, [*shape, 6, xlimbs, final_limbs])), [*shape, 6*xlimbs, final_limbs]) # unnecessary copy of entire data, simplifies work
 
         # then the product might be a bigint sum of prod along -2
 
-        prod = NDBigInt(prod, _xp=xp, _limbs=limbs)
-        return prod.sum(axis=-2, _trunc=limbs)
+        prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
+        return prod.sum(axis=-2, _trunc=final_limbs)
 
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
@@ -505,16 +533,10 @@ if __name__ == '__main__':
     assert int(NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 140859376303769844698647197831087710883
     assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259)) + NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 200036980093182317991468893325157775964
     assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 8335720360928247907391432232202715839389412648863354718493794045983121976523
-    # it might make sense to review potential simplification of sign extension in __iadd__ before implementing multiplication of negative
-    # numbers, so as to consider whether what is learned is helpful when representing negative products.
     assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
-    # 0xfffc # -3
-    # 0xfffd # -4
-    # ---------
-    #...000c     
-    #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
-    #assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
-    #assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
+    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
+    assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
+    assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
 
     import numpy as np
     np.random.seed(0)
