@@ -7,111 +7,7 @@
 #  the first dimension might be more computationally efficient and would simply
 #    mean permuting axes to broadcast consistently.
 
-# next step: walk through a __mul__ between negative values and compare the calculation
-# to normal integer multiplication
-
-# normal integer multiplication of -3 and -4 with 2x32 bits each into 64 bit output
-# 3=18446744073709551613
-# 4=18446744073709551612
-# lo3    =4294967293
-# lo4    =4294967292
-# hi3=hi4=4294967295
-# lo3*lo4=18446744043644780556
-# (hi3*hi4)<<64=0
-# (hi3*lo4)<<32=17179869184
-# (lo3*hi4)<<32=12884901888
-# (18446744043644780556 + 0 + 17179869184 + 12884901888)%(1<<64) = 12
-
-# the final sum in the code for -3 * -4 is reaching 7 instead of 12 due to the presence of further terms.
-#   [
-#       [18446744043644780556, 18446744056529682435],   # lo3 * lo4
-#       [                   0, 18446744052234715140],
-#       [         12884901888, 12884901888],            # (lo3*hi4) << 32
-#       [                   0, 4294967296],
-#       [         17179869184, 4294967296],             # (hi3*lo4) << 32
-#       [                   0, 17179869184],
-#       [                   0, 18446744065119617025],
-#       [18446744065119617025, 0],
-#       [                   0, 4294967292],
-#       [          4294967292, 0],
-#       [                   0, 4294967291],
-#       [          4294967294, 0]
-#   ]
-# before restriding it looks like this:
-#      [[[[18446744043644780556, 18446744056529682435, 0],  # lo3 * lo4
-#         [18446744052234715140, 18446744065119617025, 0]],
-#        [[         12884901888, 12884901888, 0],           # (lo3*hi4) << 32
-#         [          4294967296, 4294967296, 0]],
-#        [[         17179869184, 4294967296, 0],            # (hi3*lo4) << 32
-#         [         17179869184, 4294967296, 0]]],
-#       [[[                   0, 18446744065119617025, 18446744065119617025],
-#         [                   0, 18446744065119617025, 18446744065119617025]],
-#        [[                   0, 4294967292, 4294967292],
-#         [                   0, 4294967294, 4294967294]],
-#        [[                   0, 4294967291, 4294967294],
-#         [                   0, 4294967291, 4294967294]]]]
-
-# the problem appears to be that the second set of matrices, the ones
-# offset by 1, are missing trailing zeros to wrap during restriding.
-# (note the "oops no-op" comment showing failure to fully adjust the final
-#  bounds correctly when merging the concepts of limb count, analogous to
-#  an internal failure to remember and include concepts of setting them)
-
-# ok now i tried something that sums to [12, -7] instead of [12, -1...]
-# before restriding:
-#      [[[[18446744043644780556, 0, 0]],
-#        [[         12884901888, 0, 0]],
-#        [[         17179869184, 0, 0]]],
-#       [[[                   0, 18446744065119617025, 0]],
-#        [[                   0, 4294967292, 0]],
-#        [[                   0, 4294967291, 0]]]] 
-# after restriding:
-#      [[18446744043644780556, 0],
-#       [         12884901888, 0],
-#       [         17179869184, 0],
-#       [                   0, 18446744065119617025],
-#       [                   0, 4294967292],
-#       [                   0, 4294967291]]
-# if we review the example with 2 bits, all the columns of products are needed to produce the correct columns of sums.
-# this is likely why 3 words of input are needed in both parts to produce 3 words of correct output.
-# here, we have 2 words of desired output, so we need 2 full columns of sums.
-
-# i think it makes sense to try including the full extended inputs and then applying xp.triu to the output
-# because it seems like it would be reliable, and there's no correct output yet
-#       some interest in thinking briefly if there is an easy solution that doesn't involve copying all the data we avoiding copying or iterating
-#        the worry is that the problem could stem from an intrinsic need for both zero and nonzero triangularly-bounded data
-#        it's notable the existing restriding does produce that, a triangular bound to zero and nonzero data.
-#        if we understood what is needed more clearly, maybe there would a restriding solution.
-#           well, i guess the worry is that there is a triangular bound to _what data is used_ -- however, it is pretty likely that this data is _constant_.
-#           an alternative solution is to increase the width of the intermediate product. so that we can still get wrapped zeros and also include more data.
-#           this would solve it but would simply hide the inefficiency of producing and discarding data.
-#           a more advanced solution might be to recognize that these products of sign extensions are constant values, and fill them in without calculating.
-#       it would be nice to clearly and correctly understand what data is needed, and what its values are.
-#       [guessing the triu solution would work ...]
-
-def may_share_memory_torch(a, b):
-    if a.device != b.device:
-        return False
-    astart = a.data_ptr()
-    bstart = a.data_ptr()
-    astride = a.stride()
-    bstride = b.stride()
-    astride, adim = max([[astride[idx],idx] for idx in range(len(astride))])
-    bstride, bdim = max([[bstride[idx],idx] for idx in range(len(bstride))])
-    aend = astart + a.size(adim) * astride * a.element_size()
-    bend = bstart + b.size(bdim) * bstride * b.element_size()
-    return aend > bstart and bend > astart
-
-def may_share_memory_numpy(a, b):
-    import numpy as np
-    return np.may_share_memory(a, b)
-
-def _may_share_memory(xp, a, b):
-    try:
-        return may_share_memory_numpy(a._array, b._array)
-    except AttributeError as e:
-        raise Exception("implement _may_share_memory", e)
-
+import xp_ext
 
 class NDBigInt:
     def __init__(self, data, *, copy=None, alloc=None, _xp=None, _limbs=None):
@@ -230,7 +126,7 @@ class NDBigInt:
         x._alloc(alloc)
         y._alloc(alloc)
 
-        if _may_share_memory(xp, x._data, y._data):
+        if xp_ext.may_share_memory(x._data, y._data, xp=xp):
             raise ValueError('edge case: detect overflow for in-place add to self. is a multiply reasonable here?')
             # this is simply to detect overflow!
             # nails might work better for this case
@@ -258,7 +154,7 @@ class NDBigInt:
             # (a&63rd)==(b&63rd) is ~(a&63rd)^(b&63rd) or (a^b)&63rd == 0 given xor is bitwise
 
             # the extra limb's sign bit is needed
-            # this branch could likely be simplified away by starting with limbs = limbs + 1 and reducing it
+            # this branch could likely be simplified away by starting with limbs = limbs + 1 anyway
             limbs += 1
         else:
             # this doesn't need to allocate an entire copy of the data here
@@ -273,34 +169,35 @@ class NDBigInt:
 
         # This approach uses masking and shifting which could be reduced if the
         # data were directly cast from uint64 to uint32 without loss of
-        # elements. A function like _may_share_memory could be added to do this
+        # elements. A function like xp_ext.may_share_memory could be added to do this
         # if one doesn't exist, with fallback to the below code.
 
         # The matmuls present in this could likely be unified somehow.
 
         final_limbs = x._limbs + y._limbs # add + 1 to preallocate for overflow bits in final summation
-        x._alloc(final_limbs) # unneccessary, simplifies work
-        y._alloc(final_limbs) # unneccessary, simplifies work
-        xlimbs = x._limbs
-        ylimbs = y._limbs
+        x._alloc(final_limbs) # unneccessary, simplifies negative products via sign extension
+        y._alloc(final_limbs) # unneccessary, simplifies negative products via sign extension
+        xlimbs = final_limbs
+        ylimbs = final_limbs
         x = x._data
         y = y._data
         shape = x.shape[:-1]
 
         # halflimb product that would sum along axis -2:
+        # NOTE: these examples are not correct for negative values, which need products of ~0 in the upper triangle of zeros, and a truncated sum
         # sum([
-        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],             0,             0,             0],
-        #   [            0, xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],             0,             0],
-        #   [            0,             0, xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],             0],
+        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],     sign info,     sign info,     sign info],
+        #   [            0, xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],     sign info,     sign info],
+        #   [            0,             0, xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],     sign info],
         #   [            0,             0,             0, xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1]],
         # ], axis=-2)
         # is this outer product with stride reduced by one:
-        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],             0,             0,             0,             0],
-        #   [xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],             0,             0,             0,             0],
-        #   [xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],             0,             0,             0,             0],
+        #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],     sign info,     sign info,     sign info,             0],
+        #   [xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],     sign info,     sign info,             0,             0],
+        #   [xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],     sign info,             0,             0,             0],
         #   [xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1],        unused,        unused,        unused,        unused],
 
-        #  whole limb products that would sum along axis -2:
+        #  whole limb products that would sum along axis -2: (sign info not noted yet)
         #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,                   0,                   0],
         #    [                  0,   xl[1]*yl[0]      ,   xl[1]*yl[1]      ,                   0]],
         #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),                   0,                   0],
@@ -327,6 +224,7 @@ class NDBigInt:
         #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),                   0,                   0],
         #    [                  0, ((xh[1]*yl[0])>>32), ((xh[1]*yl[1])>>32),              unused,              unused]],
 
+
         # so the whole product-sum parts can be expressed as a restrided ndarray with an extra dimension 6 large
         # or two extra dimensions of shape (2,3)
         # where the 6 components are:
@@ -343,82 +241,29 @@ class NDBigInt:
         )
 
 
-        # something i might want to figure out for signed multiplication of 64 bit values is how to do signed multiplication of 2-bit values.
-        # -3 = 11 01
-        # -2 = 11 10
-        # -3 * -2 = 6 = 00 01 10
-        # 
-        #          11 11 01
-        #        x 11 11 10
-        #     -------------
-        #    11 11
-        #  1 11 11 1
-        # 11 11 11 11       # carry
-        #                
-        #          _0 _0 _0 # _1 _1 _1 x .. .. _0
-        #          1_ 1_ 1_ # _1 _1 _1 x .. .. 1_
-        #          0_ 0_ 0_ # 1_ 1_ 0_ x .. .. _0
-        #        1 _1 _0 _  # 1_ 1_ 0_ x .. .. 1_
-
-        #       _1 _1 _1    # _1 _1 _1 x .. _1 ..
-        #       1_ 1_ 1_    # _1 _1 _1 x .. 1_ ..
-        #       1_ 1_ 0_    # 1_ 1_ 0_ x .. _1 ..
-        #     1 _1 _0 _     # 1_ 1_ 0_ x .. 1_ ..
-
-        #    _1 _1 _1       # _1 _1 _1 x _1 .. ..
-        #    1_ 1_ 1_       # _1 _1 _1 x 1_ .. ..
-        #    1_ 1_ 0_       # 1_ 1_ 0_ x _1 .. ..
-        #  1 _1 _0 _        # 1_ 1_ 0_ x 1_ .. ..
-        # ------------------
-        # 11 00 11 00 01 10
-
-        # 
-        #             11 01
-        #        x    11 10
-        #     -------------
-        #           
-        #       11 11       # carry
-        #                
-        #             _0 _0 #    _1 _1 x    .. _0
-        #             1_ 1_ #    _1 _1 x    .. 1_
-        #             0_ 0_ #    1_ 0_ x    .. _0
-        #           1 _0 _  #    1_ 0_ x    .. 1_
-
-        #          _1 _1    #    _1 _1 x    _1 ..
-        #          1_ 1_    #    _1 _1 x    1_ ..
-        #          1_ 0_    #    1_ 0_ x    _1 ..
-        #        1 _0 _     #    1_ 0_ x    1_ ..
-        # ------------------
-        #       10 11 01 10
-
-        # 3 2bits * 3 2bits -> 3 2bits
-        # 2 2bits * 2 2bits -> 2 2bits
-        # it looks negative values need to be sign extended to as far as the final product
-
-
         # construct the outer products of halflimbs masked and shifted to
         # collect overflow and carry information and padded with zeros
 
-        #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False)
-        #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False)
+        #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False) # needs astype_nocopy as by default a copy is forced if the datatype differs
+        #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False) # needs astype_nocopy as by default a copy is forced if the datatype differs
         x_lo = x[...,:xlimbs] & 0x00000000ffffffff
         y_lo = y[...,:ylimbs] & 0x00000000ffffffff
         x_hi = x[...,:xlimbs] >> 32
         y_hi = y[...,:ylimbs] >> 32
         # low halflimb products are in-place.
-        prod[..., 0, 0, :, :ylimbs] = x_lo[...,None] @ y_lo[...,None,:]
+        prod[..., 0, 0, :xlimbs, :ylimbs] = x_lo[...,None] @ y_lo[...,None,:]
         # low*high halflimb products are shifted up by a halflimb
-        prod[..., 0, 1, :, :ylimbs] = x_lo[...,None] @ y_hi[...,None,:]
-        prod[..., 0, 2, :, :ylimbs] = x_hi[...,None] @ y_lo[...,None,:]
-        prod[..., 1, 1:, :, 1:ylimbs+1] = prod[..., 0, 1:, :, :ylimbs]
-        prod[..., 0, 1:, :, :ylimbs] <<= 32
-        prod[..., 1, 1:, :, 1:ylimbs+1] >>= 32
+        prod[..., 0, 1, :xlimbs, :ylimbs] = x_lo[...,None] @ y_hi[...,None,:]
+        prod[..., 0, 2, :xlimbs, :ylimbs] = x_hi[...,None] @ y_lo[...,None,:]
+        prod[..., 1, 1:, :xlimbs, 1:ylimbs+1] = prod[..., 0, 1:, :, :ylimbs]
+        prod[..., 0, 1:, :xlimbs, :ylimbs] <<= 32
+        prod[..., 1, 1:, :xlimbs, 1:ylimbs+1] >>= 32
         # high halflimb products are shifted up a whole limb
-        prod[..., 1, 0, :, 1:ylimbs+1] = x_hi[...,None] @ y_hi[...,None,:]
+        prod[..., 1, 0, :xlimbs, 1:ylimbs+1] = x_hi[...,None] @ y_hi[...,None,:]
         # zeros elsewhere
-        prod[..., 0, :, :, ylimbs:] = 0
-        prod[..., 1, :, :, 0] = 0
-        prod[..., 1, :, :, ylimbs+1:] = 0 # still a no-op (oops?)
+        prod[..., 0, :, :xlimbs, ylimbs:] = 0
+        prod[..., 1, :, :xlimbs, 0] = 0
+        prod[..., 1, :, :xlimbs, ylimbs+1:] = 0 # still a no-op (oops?)
 
         # reshape with the padded dimension 1 size smaller (final_limbs)
         # to give the outer product the slided offsetting for the sum
@@ -430,7 +275,14 @@ class NDBigInt:
             [*shape, 6 * xlimbs, final_limbs]
         )
 
-        prod = xp.reshape(xp.triu(xp.reshape(prod, [*shape, 6, xlimbs, final_limbs])), [*shape, 6*xlimbs, final_limbs]) # unnecessary copy of entire data, simplifies work
+        # this copy of the entire data was for simplicity and could be removed
+        # avenues of considering include:
+        #       - noting that triangular shapes can be generally addressed with restriding
+        #       - increasing the size of the intermediate data so more zeros are included
+        #       - further considering: noting that the values needed (products of ~0<<x) are all constant
+        # it seems it would be helpful to clearly and correctly understand what data is needed, and what its values are
+        # if it seems impossible to remove redundant operations here, that could be clarified or progressed further by clearly delineating why
+        prod = xp.reshape(xp.triu(xp.reshape(prod, [*shape, 6, xlimbs, final_limbs])), [*shape, 6*xlimbs, final_limbs])
 
         # then the product might be a bigint sum of prod along -2
 
@@ -500,12 +352,16 @@ class NDBigInt:
             self._data = new_data
         else:
             assert self._limbs <= alloc
-            #self._data = self._data[...,:alloc]
         if alloc > self._limbs and _sign_extend:
             self._sign_extend(self.xp, self._data, old_alloc)
-            #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
+            #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy='xp.astype always copies' and True) >> 63
     @staticmethod
     def _sign_extend(xp, data, start_limb):
+        # other avenues for this:
+        # - if we had bool storage, use a mask to write the right patterns
+        # - create an ndarray operation that presents a view of data with a different type and cast areas to write into
+        # - make use of signed storage
+
         #new_data[self._data[...,-1]>=UINT64_SIGN,old_alloc:] = UINT64_MAX
         #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
         #signed_data = xp.astype(data, xp.int64, copy=False) # always makes copy when dtypes differ
@@ -516,7 +372,7 @@ class NDBigInt:
 
         # haven't found an approach yet to do it without allocating new data
         #block = data[..., start_limb:]
-        #assert _may_share_memory(block, data)
+        #assert xp_ext.may_share_memory(block, data)
         #block[:] = data[..., start_limb-1,None]
         #block &= 0x8000000000000000
         #block[block] = 0xffffffffffffffff # here i think i incorrectly use an int as a bool
