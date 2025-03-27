@@ -1,0 +1,3 @@
+[submodule "upstr"]
+	path = _upsm
+	url = https://github.com/data-apis/array-api
