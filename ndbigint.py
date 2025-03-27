@@ -10,6 +10,53 @@
 # next step: walk through a __mul__ between negative values and compare the calculation
 # to normal integer multiplication
 
+# normal integer multiplication of -3 and -4 with 2x32 bits each into 64 bit output
+# 3=18446744073709551613
+# 4=18446744073709551612
+# lo3    =4294967293
+# lo4    =4294967292
+# hi3=hi4=4294967295
+# lo3*lo4=18446744043644780556
+# (hi3*hi4)<<64=0
+# (hi3*lo4)<<32=17179869184
+# (lo3*hi4)<<32=12884901888
+# (18446744043644780556 + 0 + 17179869184 + 12884901888)%(1<<64) = 12
+
+# the final sum in the code for -3 * -4 is reaching 7 instead of 12 due to the presence of further terms.
+#   [
+#       [18446744043644780556, 18446744056529682435],   # lo3 * lo4
+#       [                   0, 18446744052234715140],
+#       [         12884901888, 12884901888],            # (lo3*hi4) << 32
+#       [                   0, 4294967296],
+#       [         17179869184, 4294967296],             # (hi3*lo4) << 32
+#       [                   0, 17179869184],
+#       [                   0, 18446744065119617025],
+#       [18446744065119617025, 0],
+#       [                   0, 4294967292],
+#       [          4294967292, 0],
+#       [                   0, 4294967291],
+#       [          4294967294, 0]
+#   ]
+# before restriding it looks like this:
+#      [[[[18446744043644780556, 18446744056529682435, 0],  # lo3 * lo4
+#         [18446744052234715140, 18446744065119617025, 0]],
+#        [[         12884901888, 12884901888, 0],           # (lo3*hi4) << 32
+#         [          4294967296, 4294967296, 0]],
+#        [[         17179869184, 4294967296, 0],            # (hi3*lo4) << 32
+#         [         17179869184, 4294967296, 0]]],
+#       [[[                   0, 18446744065119617025, 18446744065119617025],
+#         [                   0, 18446744065119617025, 18446744065119617025]],
+#        [[                   0, 4294967292, 4294967292],
+#         [                   0, 4294967294, 4294967294]],
+#        [[                   0, 4294967291, 4294967294],
+#         [                   0, 4294967291, 4294967294]]]]
+
+# the problem appears to be that the second set of matrices, the ones
+# offset by 1, are missing trailing zeros to wrap during restriding.
+# (note the "oops no-op" comment showing failure to fully adjust the final
+#  bounds correctly when merging the concepts of limb count, analogous to
+#  an internal failure to remember and include concepts of setting them)
+
 def may_share_memory_torch(a, b):
     if a.device != b.device:
         return False
@@ -195,7 +242,8 @@ class NDBigInt:
         #    raise NotImplementedError('in place overlapping multiply')
 
         if x._data[-1] & 0x8000000000000000 or y._data[-1] & 0x8000000000000000:
-            raise NotImplementedError('product of negative')
+            import pdb; pdb.set_trace()
+            #raise NotImplementedError('product of negative')
 
         # This approach uses masking and shifting which could be reduced if the
         # data were directly cast from uint64 to uint32 without loss of
@@ -292,7 +340,7 @@ class NDBigInt:
         #    _1 _1 _1       # _1 _1 _1 x _1 .. ..
         #    1_ 1_ 1_       # _1 _1 _1 x 1_ .. ..
         #    1_ 1_ 0_       # 1_ 1_ 0_ x _1 .. ..
-        #  1 _1 _0 _        # 1_ 1_ j_ x 1_ .. ..
+        #  1 _1 _0 _        # 1_ 1_ 0_ x 1_ .. ..
         # ------------------
         # 11 00 11 00 01 10
 
@@ -459,7 +507,11 @@ if __name__ == '__main__':
     assert int(NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(7692698082559361259)) * NDBigInt(xp.asarray(15761168082059424201)) * NDBigInt(xp.asarray(8937115293130262283))) == 8335720360928247907391432232202715839389412648863354718493794045983121976523
     # it might make sense to review potential simplification of sign extension in __iadd__ before implementing multiplication of negative
     # numbers, so as to consider whether what is learned is helpful when representing negative products.
-    #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
+    assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(-4))) == 12
+    # 0xfffc # -3
+    # 0xfffd # -4
+    # ---------
+    #...000c     
     #assert int(NDBigInt(xp.asarray(-3)) * NDBigInt(xp.asarray(4))) == -12
     #assert int(NDBigInt(xp.asarray(3)) * NDBigInt(xp.asarray(-4))) == -12
     #assert int(NDBigInt(xp.asarray(-6532100632237123854),alloc=3) * NDBigInt(xp.asarray(7958265450555812818),alloc=2)) == -51984190781086484234522341753506760572
