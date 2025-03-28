@@ -23,7 +23,7 @@ class forward_dlpack:
         self.max_version = max_version
     def __dlpack__(self, stream=None, max_version=None):
         assert stream is self.stream
-        assert max_version is self.max_version or max_version >= self.max_version
+        assert max_version is self.max_version or max_version is None or max_version >= self.max_version
         return self.capsule
 
 class DTypeInfo:
