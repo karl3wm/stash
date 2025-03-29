@@ -17,17 +17,17 @@ def dl_tensor(capsule):
 
 class forward_dlpack:
     '''Converts a DLPack capsule from array.__dlpack__() back into an object that can be consumed by xp.from_dlpack(...).'''
-    def __init__(self, capsule, stream=None, max_version=None):
+    def __init__(self, capsule, **kwparams):
         self.capsule = capsule
-        self.stream = stream
-        self.max_version = max_version
-    def __dlpack__(self, stream=None, max_version=None):
-        assert stream is self.stream
-        assert max_version is self.max_version or max_version is None or max_version >= self.max_version
+        self.kwparams = kwparams
+    def __dlpack__(self, **kwparams):
+        assert kwparams == self.kwparams
         return self.capsule
 
 class DTypeInfo:
     def __init__(self, dtype, *, xp, kind=None, std=None):
+        assert dtype not in _dtype_to_info and '''duplicate dtype'''
+        _dtype_to_info[dtype] = self
         if kind is None:
             for kind in ['bool', 'signed integer', 'unsigned integer', 'real floating', 'complex floating']:
                 if xp.isdtype(dtype, kind):
@@ -77,44 +77,85 @@ class DTypeInfo:
         self.dlpack = dlpack.DLDataType.from_buffer_copy(
             dl_tensor(
                 xp.asarray([], dtype=dtype)
-                    .__dlpack__(max_version=(1,0))
+                    .__dlpack__(**xp_info(xp).dlpack_kwparams)
             ).dtype
         )
         self.std = std
         self.xp = xp
 _dtype_to_info = {}
-_xp_dtypes_enumerated = set()
 def dtype_info(dtype, *, xp):
     '''Returns a DTypeInfo object for dtype, containing attributes about the dtype.'''
     info = _dtype_to_info.get(dtype)
     if info is None:
-        if xp in _xp_dtypes_enumerated:
-            info = DTypeInfo(dtype, xp=xp)
-            _dtype_to_info[dtype] = info
-        else:
-            _info = xp.__array_namespace_info__()
-            for kind, info_dtype_name, info_dtype in set([
-                (kind, info_dtype_name, info_dtype)
-                for device in _info.devices()
-                for kind in ['bool', 'signed integer', 'unsigned integer', 'real floating', 'complex floating']
-                for info_dtype_name, info_dtype in _info.dtypes(kind=kind, device=device).items()
-            ]):
-                info_dtype_info = DTypeInfo(info_dtype, xp=xp, kind=kind, std=info_dtype_name)
-                assert info_dtype not in _dtype_to_info and '''duplicate dtype with different standard kind or name'''
-                _dtype_to_info[info_dtype] = info_dtype_info
-                if info_dtype is dtype:
-                    info = info_dtype_info
-            if info is None:
-                info = DTypeInfo(dtype, xp=xp)
-                _dtype_to_info[dtype] = info
-            _xp_dtypes_enumerated.add(xp)
+        xp_info = xp_info(xp)
+        return _dtype_to_info.get(dtype) or DTypeInfo(dtype, xp=xp)
     return info
+
+class DeviceInfo:
+    def __init__(self, device, *, xp):
+        _device_to_info[device] = self
+        self.device = device
+        self.xp = xp_info(xp)
+        for dtype_kind in ['bool', 'signed integer', 'unsigned integer', 'real floating', 'complex floating']:
+            for dtype_name, dtype in self.xp.info.dtypes(kind=dtype_kind, device=device).items():
+                setattr(type(self), 'has_' + dtype_name, False)
+                setattr(self, 'has_' + dtype_name, True)
+                setattr(self, dtype_name, dtype)
+                dtypeinfo = _dtype_to_info.get(dtype)
+                if dtypeinfo is None:
+                    DTypeInfo(dtype, xp=xp, kind=dtype_kind, std=dtype_name)
+                else:
+                    assert dtypeinfo.kind == dtype_kind
+                    assert dtypeinfo.std is None or dtypeinfo.std == dtype_name
+                    dtypeinfo.std = dtype_name
+        for dtype_name, dtype in self.xp.info.default_dtypes().items():
+            setattr(self, 'default_' + dtype_name.split(' ',1)[0] + '_type', dtype_info(dtype, xp=xp))
+_device_to_info = {}
+def device_info(device, *, xp):
+    return _device_to_info.get(device) or DeviceInfo(device, xp=xp)
+
+_xp_to_info = {}
+class XPInfo:
+    def __init__(self, xp):
+        _xp_to_info[xp] = self
+        self.xp = xp
+        self.info = xp.__array_namespace_info__()
+
+        for capname, value in self.info.capabilities().items():
+            capname = capname.replace('-','_').replace(' ','_')
+            if type(value) is bool:
+                capname = 'has_' + capname
+            setattr(self, capname, value)
+        
+        class dlpack_probe:
+            def __init__(probe, array):
+                probe.array = array
+            def __dlpack__(probe, **kwparams):
+                self.dlpack_kwparams = kwparams
+                return probe.array.__dlpack__(**kwparams)
+        test_array = xp.asarray([0])
+        test_imported_array = xp.from_dlpack(dlpack_probe(test_array))
+        try:
+            test_imported_array[0] = 1
+            assert test_array[0] == 1
+        except:
+            import warnings
+            self.has_writeable_from_dlpack = False
+            if xp.__name__ in ['numpy', 'array_api_strict']:
+                warnings.warn("numpy isn't writing through dlpack arrays; you can install https://github.com/numpy/numpy/pull/28600 with python3 -m pip install git+https://github.com/karl3wm/numpy@writeable-from-dlpack")
+        else:
+            self.has_writeable_from_dlpack = True
+
+        self.devices = [device_info(device, xp=xp) for device in self.info.devices()]
+        self.default_device = device_info(self.info.default_device(), xp=xp)
+def xp_info(xp):
+    return _xp_to_info.get(xp) or XPInfo(xp)
 
 def as_nocopy(a, *, xp, shape=None, dtype=None, strides=None):
     '''Alias the data underlying an array as different shape, dtype, and/or strides.
-       Note: The current implementation uses DLPack under the hood, which is read-only in NumPy.
     '''
-    dlpack = a.__dlpack__(max_version=(1,0))
+    dlpack_kwparams = xp_info(xp).dlpack_kwparams
+    dlpack = a.__dlpack__(**dlpack_kwparams)
     dlt = dl_tensor(dlpack)
     if dtype is not None:
         dlpack_dtype = dtype_info(dtype, xp=xp).dlpack
@@ -127,11 +168,11 @@ def as_nocopy(a, *, xp, shape=None, dtype=None, strides=None):
         dlt.shape = (ctypes.c_long * len(shape))(*shape)
     if strides is not None:
         dlt.strides = (ctypes.c_long * len(strides))(*strides)
-    return xp.from_dlpack(forward_dlpack(dlpack, max_version=(1,0)))
+    return xp.from_dlpack(forward_dlpack(dlpack, **dlpack_kwparams))
 
 def strides_bytes(a, *, xp):
     '''Returns the strides held by an array as the raw bytes between elements for each dimension.'''
-    dlpack = a.__dlpack__(max_version=(1,0))
+    dlpack = a.__dlpack__()
     dlt = dl_tensor(dlpack)
     strides_p = dlt.strides
     elem_size = dlt.dtype.bits >> 3
@@ -148,7 +189,7 @@ def strides_bytes(a, *, xp):
 
 def data_ptr(a, *, xp):
     '''Returns the underlying address as an integer of the first element in an array.'''
-    dlpack = a.__dlpack__(max_version=(1,0))
+    dlpack = a.__dlpack__()
     dlt = dl_tensor(dlpack)
     return dlt.data + dlt.byte_offset
 
@@ -158,8 +199,8 @@ def may_share_memory(a, b, *, xp):
     '''
     if a.device != b.device:
         return False
-    astart = data_ptr(a)
-    bstart = data_ptr(b)
+    astart = data_ptr(a, xp=xp)
+    bstart = data_ptr(b, xp=xp)
     astride = strides_bytes(a, xp=xp)
     bstride = strides_bytes(b, xp=xp)
     astride, adim = max([[astride[idx],idx] for idx in range(astride.shape[0])])
