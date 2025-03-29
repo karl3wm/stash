@@ -1,6 +1,9 @@
 import ctypes
 import dlpack # python3 -m pip install pydlpack
-  # note: dlpack can also alias python buffers as tensors
+  # note: dlpack can also import python buffers as tensors
+
+# The DeviceInfo.has_dtype flags for standard dtypes in this file would be even more useful with nonstandard ones such as bfloat16!
+# They are presently set in DeviceInfo.__init__ but could also respond to the std= kwparam of DTypeInfo
 
 _DLMTV_p = ctypes.POINTER(dlpack.DLManagedTensorVersioned)
 _DLMT_p = ctypes.POINTER(dlpack.DLManagedTensor)
@@ -17,9 +20,12 @@ def dl_tensor(capsule):
 
 class forward_dlpack:
     '''Converts a DLPack capsule from array.__dlpack__() back into an object that can be consumed by xp.from_dlpack(...).'''
-    def __init__(self, capsule, **kwparams):
+    def __init__(self, capsule, device_type_id_tuple, **kwparams):
         self.capsule = capsule
+        self.device_type_id = device_type_id_tuple
         self.kwparams = kwparams
+    def __dlpack_device__(self):
+        return self.device_type_id
     def __dlpack__(self, **kwparams):
         assert kwparams == self.kwparams
         return self.capsule
@@ -131,6 +137,8 @@ class XPInfo:
         class dlpack_probe:
             def __init__(probe, array):
                 probe.array = array
+            def __dlpack_device__(probe):
+                return (dlpack.DLDeviceType.from_label('DLCPU'), None)
             def __dlpack__(probe, **kwparams):
                 self.dlpack_kwparams = kwparams
                 return probe.array.__dlpack__(**kwparams)
@@ -166,7 +174,7 @@ class XPInfo:
         return array._array
     @staticmethod
     def __backend_array_default(tensor):
-        '''Attempts to return the underyling tensor used by the backend API, defaulting to returning the passed tensor.'''
+        '''Attempts to return the underlying tensor used by the backend API, defaulting to returning the passed tensor.'''
         return tensor
 
 def xp_info(xp):
@@ -195,7 +203,7 @@ def as_nocopy(a, *, xp, shape=None, dtype=None, strides=None):
             dlt.shape = (ctypes.c_long * len(shape))(*shape)
         if strides is not None:
             dlt.strides = (ctypes.c_long * len(strides))(*strides)
-    return xp.from_dlpack(forward_dlpack(dlpack, **dlpack_kwparams))
+    return xp.from_dlpack(forward_dlpack(dlpack, (dlt.device.device_type, dlt.device.device_id), **dlpack_kwparams))
 
 def strides_bytes(a, *, xp):
     '''Returns the strides held by an array as the raw bytes between elements for each dimension.'''
