@@ -112,6 +112,7 @@ class DeviceInfo:
             setattr(self, 'default_' + dtype_name.split(' ',1)[0] + '_type', dtype_info(dtype, xp=xp))
 _device_to_info = {}
 def device_info(device, *, xp):
+    '''Returns a DeviceInfo object for device, containing attributes about the device.'''
     return _device_to_info.get(device) or DeviceInfo(device, xp=xp)
 
 _xp_to_info = {}
@@ -126,7 +127,7 @@ class XPInfo:
             if type(value) is bool:
                 capname = 'has_' + capname
             setattr(self, capname, value)
-        
+
         class dlpack_probe:
             def __init__(probe, array):
                 probe.array = array
@@ -142,32 +143,58 @@ class XPInfo:
             import warnings
             self.has_writeable_from_dlpack = False
             if xp.__name__ in ['numpy', 'array_api_strict']:
-                warnings.warn("numpy isn't writing through dlpack arrays; you can install https://github.com/numpy/numpy/pull/28600 with python3 -m pip install git+https://github.com/karl3wm/numpy@writeable-from-dlpack")
+                warnings.warn("numpy isn't writing through dlpack arrays; you can install https://github.com/numpy/numpy/pull/28600 with python3 -m pip install git+https://github.com/karl3wm/numpy@writeable-from-dlpack if has_writeable_from_dlpack is needed")
         else:
             self.has_writeable_from_dlpack = True
 
         self.devices = [device_info(device, xp=xp) for device in self.info.devices()]
         self.default_device = device_info(self.info.default_device(), xp=xp)
+
+        if xp.__name__ in ['numpy', 'array_api_strict']:
+            import numpy as np
+            self.backend_array = self.__backend_array_array_api_strict
+            self.backend_api = np
+            self.is_numpy = True
+        else:
+            self.backend_array = self.__backend_array_default
+            self.backend_api = xp
+            self.is_numpy = False
+
+    @staticmethod
+    def __backend_array_array_api_strict(array):
+        '''Returns the numpy array object underlying an array_api_strict array object.'''
+        return array._array
+    @staticmethod
+    def __backend_array_default(tensor):
+        '''Attempts to return the underyling tensor used by the backend API, defaulting to returning the passed tensor.'''
+        return tensor
+
 def xp_info(xp):
+    '''Returns an XPInfo object for xp, containing attributes about the api.'''
     return _xp_to_info.get(xp) or XPInfo(xp)
 
 def as_nocopy(a, *, xp, shape=None, dtype=None, strides=None):
     '''Alias the data underlying an array as different shape, dtype, and/or strides.
+       This presently uses dlpacks, so the return value is only writeable if xp_info(xp).has_writeable_from_dlpack == True
     '''
-    dlpack_kwparams = xp_info(xp).dlpack_kwparams
-    dlpack = a.__dlpack__(**dlpack_kwparams)
-    dlt = dl_tensor(dlpack)
-    if dtype is not None:
-        dlpack_dtype = dtype_info(dtype, xp=xp).dlpack
-        if dlpack_dtype.bits != dlt.dtype.bits and shape is None:
-            raise ValueError("The new dtype is a different size from the old. Specify the shape.") # It would be intuitive to grow the smallest (i.e. dense) dimension.
-        dlt.dtype = dlpack_dtype
-    if shape is not None:
-        if strides is None and dlt.strides is not None:
-            raise ValueError("The passed array is not dense row-major. Specify both shape and strides.")
-        dlt.shape = (ctypes.c_long * len(shape))(*shape)
-    if strides is not None:
-        dlt.strides = (ctypes.c_long * len(strides))(*strides)
+    info = xp_info(xp)
+#    if not info.has_writeable_from_dlpack and info.is_numpy:
+#    else:
+    if True:
+        dlpack_kwparams = info.dlpack_kwparams
+        dlpack = a.__dlpack__(**dlpack_kwparams)
+        dlt = dl_tensor(dlpack)
+        if dtype is not None:
+            dlpack_dtype = dtype_info(dtype, xp=xp).dlpack
+            if dlpack_dtype.bits != dlt.dtype.bits and shape is None:
+                raise ValueError("The new dtype is a different size from the old. Specify the shape.") # It would be intuitive to grow the smallest (i.e. dense) dimension.
+            dlt.dtype = dlpack_dtype
+        if shape is not None:
+            if strides is None and dlt.strides is not None:
+                raise ValueError("The passed array is not dense row-major. Specify both shape and strides.")
+            dlt.shape = (ctypes.c_long * len(shape))(*shape)
+        if strides is not None:
+            dlt.strides = (ctypes.c_long * len(strides))(*strides)
     return xp.from_dlpack(forward_dlpack(dlpack, **dlpack_kwparams))
 
 def strides_bytes(a, *, xp):
