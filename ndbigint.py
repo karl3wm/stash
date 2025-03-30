@@ -60,7 +60,7 @@ class NDBigInt:
     def mT(self):
         xp = self.xp
         return NDBigInt(
-            xp.moveaxis(self._data, -2, -3), 
+            xp.moveaxis(self._data, -2, -3),
             copy=False,
             _xp=xp,
             _limbs=self._limbs
@@ -107,7 +107,7 @@ class NDBigInt:
         # a gigantic context there would be more devs
 
         xp = x.xp
-        ndim = self.ndim
+        ndim = x.ndim
         if axis < 0:
             assert axis >= -ndim
             axis += ndim
@@ -325,7 +325,7 @@ class NDBigInt:
         # then the product might be a bigint sum of prod along -2
 
         prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
-        return prod.sum(axis=-2, _trunc=final_limbs)
+        return prod.sum(axis=-1, _trunc=final_limbs)
 
     def __matmul__(x, y):
         raise NotImplementedError('matmul')
