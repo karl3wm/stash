@@ -207,8 +207,7 @@ class NDBigInt:
 
         # This approach uses masking and shifting which could be reduced if the
         # data were directly cast from uint64 to uint32 without loss of
-        # elements. A function like xp_ext.may_share_memory could be added to do this
-        # if one doesn't exist, with fallback to the below code.
+        # elements, using ext_xp.as_nocopy.
 
         # The matmuls present in this could likely be unified somehow.
 
@@ -222,7 +221,6 @@ class NDBigInt:
         shape = x.shape[:-1]
 
         # halflimb product that would sum along axis -2:
-        # NOTE: these examples are not correct for negative values, which need products of ~0 in the upper triangle of zeros, and a truncated sum
         # sum([
         #   [xlo[0]*ylo[0], xlo[0]*yhi[0], xlo[0]*ylo[1], xlo[0]*yhi[1],     sign info,     sign info,     sign info],
         #   [            0, xhi[0]*ylo[0], xhi[0]*yhi[0], xhi[0]*ylo[1], xhi[0]*yhi[1],     sign info,     sign info],
@@ -235,31 +233,31 @@ class NDBigInt:
         #   [xlo[1]*ylo[0], xlo[1]*yhi[0], xlo[1]*ylo[1], xlo[1]*yhi[1],     sign info,             0,             0,             0],
         #   [xhi[1]*ylo[0], xhi[1]*yhi[0], xhi[1]*ylo[1], xhi[1]*yhi[1],        unused,        unused,        unused,        unused],
 
-        #  whole limb products that would sum along axis -2: (sign info not noted yet)
-        #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,                   0,                   0],
-        #    [                  0,   xl[1]*yl[0]      ,   xl[1]*yl[1]      ,                   0]],
-        #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),                   0,                   0],
-        #    [                  0, ((xl[1]*yh[0])<<32), ((xl[1]*yh[1])<<32),                   0]],
-        #   [[((xh[0]*yl[0])<<32), ((xh[0]*yl[1])<<32),                   0,                   0],
-        #    [                  0, ((xh[1]*yl[0])<<32), ((xh[1]*yl[1])<<32),                   0]],
-        #   [[                  0,   xh[0]*yh[0]      ,   xh[0]*yh[1]      ,                   0],
+        #  whole limb products that would sum along axis -2:
+        #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,   sign info        ,   sign info        ],
+        #    [                  0,   xl[1]*yl[0]      ,   xl[1]*yl[1]      ,   sign info        ]],
+        #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),   sign info <<32   ,   sign info <<32   ],
+        #    [                  0, ((xl[1]*yh[0])<<32), ((xl[1]*yh[1])<<32),   sign info <<32   ]],
+        #   [[((xh[0]*yl[0])<<32), ((xh[0]*yl[1])<<32),   sign info <<32   ,   sign info <<32   ],
+        #    [                  0, ((xh[1]*yl[0])<<32), ((xh[1]*yl[1])<<32),   sign info <<32   ]],
+        #   [[                  0,   xh[0]*yh[0]      ,   xh[0]*yh[1]      ,   sign info        ],
         #    [                  0,                   0,   xh[1]*yh[0]      ,   xh[1]*yh[1]      ]],
-        #   [[                  0, ((xl[0]*yh[0])>>32), ((xl[0]*yh[1])>>32),                   0],
+        #   [[                  0, ((xl[0]*yh[0])>>32), ((xl[0]*yh[1])>>32),   sign info >>32   ],
         #    [                  0,                   0, ((xl[1]*yh[0])>>32), ((xl[1]*yh[1])>>32)]],
-        #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),                   0],
+        #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),   sign info >>32   ],
         #    [                  0,                   0, ((xh[1]*yl[0])>>32), ((xh[1]*yl[1])>>32)]],
         # come from these outer products:
-        #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,                   0,                   0,                   0],
-        #    [  xl[1]*yl[0]      ,   xl[1]*yl[1]      ,                   0,              unused,              unused]],
-        #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),                   0,                   0,                   0],
-        #    [((xl[1]*yh[0])<<32), ((xl[1]*yh[1])<<32),                   0,              unused,              unused]],
-        #   [[((xh[0]*yl[0])<<32), ((xh[0]*yl[1])<<32),                   0,                   0,                   0],
-        #    [((xh[1]*yl[0])<<32), ((xh[1]*yl[1])<<32),                   0,              unused,              unused]],
-        #   [[                  0,   xh[0]*yh[0]      ,   xh[0]*yh[1]      ,                   0,                   0],
+        #   [[  xl[0]*yl[0]      ,   xl[0]*yl[1]      ,   sign info        ,   sign info        ,                   0],
+        #    [  xl[1]*yl[0]      ,   xl[1]*yl[1]      ,   sign info        ,              unused,              unused]],
+        #   [[((xl[0]*yh[0])<<32), ((xl[0]*yh[1])<<32),   sign info <<32   ,   sign info <<32   ,                   0],
+        #    [((xl[1]*yh[0])<<32), ((xl[1]*yh[1])<<32),   sign info <<32   ,              unused,              unused]],
+        #   [[((xh[0]*yl[0])<<32), ((xh[0]*yl[1])<<32),   sign info <<32   ,   sign info <<32   ,                   0],
+        #    [((xh[1]*yl[0])<<32), ((xh[1]*yl[1])<<32),   sign info <<32   ,              unused,              unused]],
+        #   [[                  0,   xh[0]*yh[0]      ,   xh[0]*yh[1]      ,   sign info        ,                   0],
         #    [                  0,   xh[1]*yh[0]      ,   xh[1]*yh[1]      ,              unused,              unused]],
-        #   [[                  0, ((xl[0]*yh[0])>>32), ((xl[0]*yh[1])>>32),                   0,                   0],
+        #   [[                  0, ((xl[0]*yh[0])>>32), ((xl[0]*yh[1])>>32),   sign info >>32   ,                   0],
         #    [                  0, ((xl[1]*yh[0])>>32), ((xl[1]*yh[1])>>32),              unused,              unused]],
-        #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),                   0,                   0],
+        #   [[                  0, ((xh[0]*yl[0])>>32), ((xh[0]*yl[1])>>32),   sign info >>32   ,                   0],
         #    [                  0, ((xh[1]*yl[0])>>32), ((xh[1]*yl[1])>>32),              unused,              unused]],
 
 
