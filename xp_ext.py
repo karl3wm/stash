@@ -20,12 +20,12 @@ def dl_tensor(capsule):
 
 class forward_dlpack:
     '''Converts a DLPack capsule from array.__dlpack__() back into an object that can be consumed by xp.from_dlpack(...).'''
-    def __init__(self, capsule, device_type_id_tuple, **kwparams):
+    def __init__(self, capsule, dlpack_device_tuple, **kwparams):
         self.capsule = capsule
-        self.device_type_id = device_type_id_tuple
+        self.dlpack_device = dlpack_device_tuple
         self.kwparams = kwparams
     def __dlpack_device__(self):
-        return self.device_type_id
+        return self.dlpack_device
     def __dlpack__(self, **kwparams):
         assert kwparams == self.kwparams
         return self.capsule
@@ -80,22 +80,24 @@ class DTypeInfo:
             self.max = self.info.max
             self.min = self.info.min
         self.dtype = dtype
+        self.xp = xp_info(xp)
+        self.backend = self.xp.asbackend_dtype(self.dtype)
         self.dlpack = dlpack.DLDataType.from_buffer_copy(
             dl_tensor(
                 xp.asarray([], dtype=dtype)
-                    .__dlpack__(**xp_info(xp).dlpack_kwparams)
+                    .__dlpack__(**self.xp.dlpack_kwparams)
             ).dtype
         )
         self.std = std
-        self.xp = xp
 _dtype_to_info = {}
 def dtype_info(dtype, *, xp):
     '''Returns a DTypeInfo object for dtype, containing attributes about the dtype.'''
     info = _dtype_to_info.get(dtype)
     if info is None:
-        xp_info = xp_info(xp)
+        xp_info(xp) # ensures standard dtypes are constructed with standard kinds and names
         return _dtype_to_info.get(dtype) or DTypeInfo(dtype, xp=xp)
-    return info
+    else:
+        return info
 
 class DeviceInfo:
     def __init__(self, device, *, xp):
@@ -116,6 +118,19 @@ class DeviceInfo:
                     dtypeinfo.std = dtype_name
         for dtype_name, dtype in self.xp.info.default_dtypes().items():
             setattr(self, 'default_' + dtype_name.split(' ',1)[0] + '_type', dtype_info(dtype, xp=xp))
+        self.backend = self.xp.asbackend_device(self.device)
+        try:
+            self.dlpack = dlpack.DLDevice.from_buffer_copy(
+                dl_tensor(
+                    xp.asarray([], device=device)
+                        .__dlpack__(**self.xp.dlpack_kwparams)
+                ).device
+            )
+            self.dlpack_device = (self.dlpack.device_type.value, self.dlpack.device_id)
+            self.has_dlpack = True
+        except RuntimeError:
+            self.has_dlpack = False
+
 _device_to_info = {}
 def device_info(device, *, xp):
     '''Returns a DeviceInfo object for device, containing attributes about the device.'''
@@ -134,6 +149,30 @@ class XPInfo:
                 capname = 'has_' + capname
             setattr(self, capname, value)
 
+        self.is_array_api_strict = False
+        self.is_array_api_compat = False
+        self.is_numpy = False
+        self.asbackend = self.__asbackend_default
+        self.asbackend_dtype = self.__asbackend_default
+        self.asbackend_device = self.__asbackend_default
+        self.backend = xp
+        if xp.__name__ == 'array_api_strict':
+            self.is_array_api_strict = True
+            self.asbackend = self.__asbackend_array_api_strict_array
+            self.asbackend_dtype = self.__asbackend_array_api_strict_dtype
+            self.asbackend_device = self.__asbackend_array_api_strict_device
+            self.is_numpy = True
+        elif xp.__name__ == 'numpy':
+            self.is_numpy = True
+        elif xp.__name__.startswith('array_api_compat.'):
+            self.is_array_api_compat = True
+            if xp.__name__.endswith('.numpy'):
+                self.is_numpy = True
+        if self.is_numpy:
+            import numpy as np
+            self.backend = np
+
+
         class dlpack_probe:
             def __init__(probe, array):
                 probe.array = array
@@ -148,9 +187,9 @@ class XPInfo:
             test_imported_array[0] = 1
             assert test_array[0] == 1
         except:
-            import warnings
             self.has_writeable_from_dlpack = False
-            if xp.__name__ in ['numpy', 'array_api_strict']:
+            if self.is_numpy:
+                import warnings
                 warnings.warn("numpy isn't writing through dlpack arrays; you can install https://github.com/numpy/numpy/pull/28600 with python3 -m pip install git+https://github.com/karl3wm/numpy@writeable-from-dlpack if has_writeable_from_dlpack is needed")
         else:
             self.has_writeable_from_dlpack = True
@@ -158,52 +197,79 @@ class XPInfo:
         self.devices = [device_info(device, xp=xp) for device in self.info.devices()]
         self.default_device = device_info(self.info.default_device(), xp=xp)
 
-        if xp.__name__ in ['numpy', 'array_api_strict']:
-            import numpy as np
-            self.backend_array = self.__backend_array_array_api_strict
-            self.backend_api = np
-            self.is_numpy = True
-        else:
-            self.backend_array = self.__backend_array_default
-            self.backend_api = xp
-            self.is_numpy = False
-
     @staticmethod
-    def __backend_array_array_api_strict(array):
+    def __asbackend_array_api_strict_array(array):
         '''Returns the numpy array object underlying an array_api_strict array object.'''
         return array._array
     @staticmethod
-    def __backend_array_default(tensor):
-        '''Attempts to return the underlying tensor used by the backend API, defaulting to returning the passed tensor.'''
-        return tensor
+    def __asbackend_array_api_strict_dtype(dtype):
+        '''Returns the numpy dtype object underlying an array_api_strict dtype object.'''
+        return dtype._np_dtype
+    @staticmethod
+    def __asbackend_array_api_strict_device(device):
+        '''Returns the numpy device information underlying an array_api_strict device object.'''
+        return device._device
+    @staticmethod
+    def __asbackend_default(value):
+        '''Attempts to return the underlying value used by the backend API, defaulting to returning the passed value.'''
+        return value
 
 def xp_info(xp):
     '''Returns an XPInfo object for xp, containing attributes about the api.'''
     return _xp_to_info.get(xp) or XPInfo(xp)
 
-def as_nocopy(a, *, xp, shape=None, dtype=None, strides=None):
-    '''Alias the data underlying an array as different shape, dtype, and/or strides.
-       This presently uses dlpacks, so the return value is only writeable if xp_info(xp).has_writeable_from_dlpack == True
-    '''
+def as_nocopy(a, *, xp, shape=None, dtype=None, strides_bytes=None):
+    '''Alias the data underlying an array as different shape, dtype, and/or strides.'''
     info = xp_info(xp)
-#    if not info.has_writeable_from_dlpack and info.is_numpy:
-#    else:
-    if True:
+    dtype_old = dtype_info(a.dtype, xp=xp)
+    if dtype is None:
+        dtype_new = dtype_old
+    else:
+        dtype_new = dtype_info(dtype, xp=xp)
+        if dtype_old.bits != dtype_new.bits and shape is None and strides is None:
+            raise ValueError("The new dtype is a different size from the old. Specify the shape.") # It would be intuitive to grow the smallest (i.e. dense) dimension.
+    if not info.has_writeable_from_dlpack and info.is_numpy:
+        a = info.asbackend(a)
+        np = info.backend
+        buffer = np.data
+        if shape is not None:
+            if strides_bytes is None:
+                if buffer.C_CONTIGUOUS:
+                    strides_bytes = shape_to_strides_row_major(shape, elem_size=dtype_new.size, xp=xp)
+                elif buffer.F_CONTIGUOUS:
+                    strides_bytes = shape_to_strides_column_major(shape, elem_size=dtype_new.size, xp=xp)
+                else:
+                    raise ValueError("The passed array is not dense. Specify both shape and strides.")
+        else:
+            shape = a.shape
+            if strides_bytes is None:
+                strides_bytes = a.strides
+        a = np.frombuffer(a.data, dtype=dtype_new.backend)
+        return np.lib.stride_tricks.as_strided(a, shape=shape, strides=strides_bytes, subok=True)
+    else:
         dlpack_kwparams = info.dlpack_kwparams
         dlpack = a.__dlpack__(**dlpack_kwparams)
         dlt = dl_tensor(dlpack)
-        if dtype is not None:
-            dlpack_dtype = dtype_info(dtype, xp=xp).dlpack
-            if dlpack_dtype.bits != dlt.dtype.bits and shape is None:
-                raise ValueError("The new dtype is a different size from the old. Specify the shape.") # It would be intuitive to grow the smallest (i.e. dense) dimension.
-            dlt.dtype = dlpack_dtype
+        dlt.dtype = dtype_new.dlpack
         if shape is not None:
-            if strides is None and dlt.strides is not None:
+            if strides_bytes is None and dlt.strides is not None:
                 raise ValueError("The passed array is not dense row-major. Specify both shape and strides.")
             dlt.shape = (ctypes.c_long * len(shape))(*shape)
         if strides is not None:
-            dlt.strides = (ctypes.c_long * len(strides))(*strides)
-    return xp.from_dlpack(forward_dlpack(dlpack, (dlt.device.device_type, dlt.device.device_id), **dlpack_kwparams))
+            dlt.strides = (ctypes.c_long * len(strides))(*[stride//dtype_new.size for stride in strides_bytes])
+        return xp.from_dlpack(forward_dlpack(dlpack, (dlt.device.device_type, dlt.device.device_id), **dlpack_kwparams))
+
+def shape_to_strides_row_major(shape, *, elem_size=1, xp):
+    tmp = xp.asarray(shape, copy=True)
+    tmp[1:] = tmp[:0:-1]
+    tmp[0] = elem_size
+    return xp.cumulative_prod(tmp)[::-1]
+
+def shape_to_strides_column_major(shape, *, elem_size=1, xp):
+    tmp = xp.asarray(shape, copy=True)
+    tmp[1:] = tmp[:-1]
+    tmp[0] = elem_size
+    return xp.cumulative_prod(tmp)
 
 def strides_bytes(a, *, xp):
     '''Returns the strides held by an array as the raw bytes between elements for each dimension.'''
@@ -217,10 +283,7 @@ def strides_bytes(a, *, xp):
     else:
         # tensor is compact and row-majored
         # this could benefit from a backend-specific approach
-        tmp = xp.asarray(a.shape)
-        tmp[1:] = tmp[:0:-1]
-        tmp[0] = elem_size
-        return xp.cumulative_prod(tmp)[::-1]
+        return shape_to_strides_row_major(a.shape, elem_size=elem_size, xp=xp)
 
 def data_ptr(a, *, xp):
     '''Returns the underlying address as an integer of the first element in an array.'''
