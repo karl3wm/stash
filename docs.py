@@ -7,6 +7,16 @@ def inject_docs(xp):
             getattr(xp, fn).__doc__ = docf.__doc__
         except AttributeError:
             pass
+        except TypeError:
+            pass
+    array = type(xp.asarray([]))
+    for attrn, docattr in docs.array.__dict__.items():
+        try:
+            getattr(array, attrn).__doc__ = docattr.__doc__
+        except AttributeError:
+            pass
+        except TypeError:
+            pass
 
 for xp_modname in [
     'array_api_strict',
@@ -18,4 +28,4 @@ for xp_modname in [
     if xp_modname in sys.modules:
         inject_docs(sys.modules[xp_modname])
 if 'numpy' in sys.modules:
-    inject_docs(sys.modules['numpy'].generic)
+    inject_docs(sys.modules['numpy'])

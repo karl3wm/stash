@@ -31,21 +31,53 @@ class NDBigInt:
                     alloc = 2
                 self._data = xp.empty([*data.shape, alloc], dtype=xp.uint64)
                 self._data[...,0] = data
-                self._data[...,1] = 0
+                self._data[...,1:] = 0
                 self._limbs = 2
                 alloc = None
             else:
+                # xp.astype copies all data but there isn't quite yet a way to alias data from a different type in a backend-independent writeable manner
                 self._data = xp.astype(data[...,None], xp.uint64, copy=bool(copy))
                 self._limbs = 1
         self._view = copy is False
         if alloc is not None:
             self._alloc(alloc)
     @property
-    def limbs(self):
-        return self._limbs
+    def T(self):
+        xp = self.xp
+        return NDBigInt(
+            xp.permute_dims(self, [1,0,2]),
+            copy=False,
+            _xp=xp,
+            _limbs=self._limbs
+        )
+    @property
+    def device(self):
+        return self._data.device
+    @property
+    def dtype(self):
+        return self._data.dtype
+    @property
+    def mT(self):
+        xp = self.xp
+        return NDBigInt(
+            xp.moveaxis(self._data, -2, -3), 
+            copy=False,
+            _xp=xp,
+            _limbs=self._limbs
+        )
+    @property
+    def ndim(self):
+        return self._data.ndim - 1
     @property
     def shape(self):
         return self._data.shape[:-1]
+    @property
+    def size(self):
+        xp = self.xp
+        return xp.prod(xp.asarray(self.shape))
+    @property
+    def limbs(self):
+        return self._limbs
     def broadcast_arrays(*arrays):
         xp = arrays[0].xp
         limbs = max([ary.limbs for ary in arrays])
@@ -55,16 +87,16 @@ class NDBigInt:
             for ary in xp.broadcast_arrays(*[ary._data for ary in arrays])
         ]
     def reshape(x, /, shape, **kwparams):
-        x = NDBigInt(x)
         xp = x.xp
-        x._data = xp.reshape(x._data, [*shape, x.limbs], **kwparams)
-        return x
+        limbs = x._limbs
+        data = xp,reshape(x._data, [*shape, limbs], **kwparams)
+        return NDBigInt(data, copy=False, _xp=xp, _limbs=limbs)
     def sum(x, *, axis = None, keepdims = False, _trunc = None):
         if _trunc is None:
             _trunc = x._limbs + 1
             x._alloc(x._limbs + 1)
         if axis is None:
-            return x.reshape([-1]).sum(keepdims = keepdims)
+            return x.reshape([-1]).sum(axis = 0, keepdims = keepdims)
 
         # i think the immediately clearest way to vectorize this would be to
         # assert that the dimension size fits within 32 bits (<sqrt(64bits))
@@ -75,6 +107,12 @@ class NDBigInt:
         # a gigantic context there would be more devs
 
         xp = x.xp
+        ndim = self.ndim
+        if axis < 0:
+            assert axis >= -ndim
+            axis += ndim
+        else:
+            assert axis < ndim
         size = x._data.shape[axis]
         copy = True
         preceding_axes = [slice(None)] * (axis - 1)
@@ -289,6 +327,25 @@ class NDBigInt:
         prod = NDBigInt(prod, _xp=xp, _limbs=final_limbs)
         return prod.sum(axis=-2, _trunc=final_limbs)
 
+    def __matmul__(x, y):
+        raise NotImplementedError('matmul')
+        out_slice = [...]
+        if len(x.shape) < 2:
+            x = x[None,...]
+            out_slice.append(0)
+        if len(y.shape) < 2:
+            y = y[None]
+            out_slice.append(0)
+        else:
+            out_slice.append(slice(None))
+
+        # (...,M,K) @ (...,K,N) = (...,M,N)
+        # instead we do
+        # sum((...,M,[],K) * (...,[],N,K), -1) = (...,M,N).
+        return (
+                x[...,:,None,:] * y.mT[...,None,:,:] # rows * cols
+            ).sum(axis=-1)[*out_slice]
+
     def __isub__(x, y):
         x._data ^= 0xffffffffffffffff
         x += y
@@ -344,16 +401,17 @@ class NDBigInt:
                 idx[off] = 0
                 off -= 1
     def _alloc(self, alloc, _sign_extend=True):
+        xp = self.xp
         old_alloc = self._data.shape[-1]
         if old_alloc < alloc:
             assert not self._view and "resizing through view might indicate implementation of view functionality in ndarray.py and using it for resizing here"
-            new_data = self.xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
+            new_data = xp.empty([*self._data.shape[:-1], alloc], dtype=xp.uint64)
             new_data[...,:old_alloc] = self._data[...,:old_alloc]
             self._data = new_data
         else:
             assert self._limbs <= alloc
         if alloc > self._limbs and _sign_extend:
-            self._sign_extend(self.xp, self._data, old_alloc)
+            self._sign_extend(xp, self._data, self._limbs)
             #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy='xp.astype always copies' and True) >> 63
     @staticmethod
     def _sign_extend(xp, data, start_limb):
@@ -366,9 +424,14 @@ class NDBigInt:
         #self._data[...,old_alloc:] = self.xp.astype(self._data[...,old_alloc-1,None], xp.int64, copy=False) >> 63
         #signed_data = xp.astype(data, xp.int64, copy=False) # always makes copy when dtypes differ
 
-        signs = xp.astype(data[..., start_limb-1, None], xp.int64) # reduce new allocation size to 1 limb
-        signs >>= 63
-        data[..., start_limb:] = signs
+        signed_data = xp_ext.as_nocopy(data, dtype=xp.int64, xp=xp)
+        signed_data[..., start_limb] = signed_data[..., start_limb-1]
+        signed_data[..., start_limb] >>= 63
+        signed_data[..., start_limb+1:] = signed_data[..., start_limb, None]
+
+        #signs = xp.astype(data[..., start_limb-1, None], xp.int64) # reduce new allocation size to 1 limb
+        #signs >>= 63
+        #data[..., start_limb:] = signs
 
         # haven't found an approach yet to do it without allocating new data
         #block = data[..., start_limb:]
