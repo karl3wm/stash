@@ -337,6 +337,9 @@ class NDBigInt:
         else:
             out_slice.append(slice(None))
 
+        y._alloc(x._limbs + y._limbs)
+        x._alloc(x._limbs + y._limbs)
+
         # (...,M,K) @ (...,K,N) = (...,M,N)
         # instead we do
         # sum((...,M,[],K) * (...,[],N,K), -1) = (...,M,N).
@@ -484,3 +487,5 @@ if __name__ == '__main__':
     sum2 += ars[2].sum(axis=0)
     assert int(sum2[0,0]) == int(sum1[0,0])
     assert xp.all(sum1 == sum2)
+
+    ars[0] @ ars[1]

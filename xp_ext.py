@@ -5,6 +5,8 @@ import dlpack # python3 -m pip install pydlpack
 # The DeviceInfo.has_dtype flags for standard dtypes in this file would be even more useful with nonstandard ones such as bfloat16!
 # They are presently set in DeviceInfo.__init__ but could also respond to the std= kwparam of DTypeInfo
 
+# Some of the stride mutations are awkward; was planning to make strides and shapes all be ndarrays to ease such things.
+
 _DLMTV_p = ctypes.POINTER(dlpack.DLManagedTensorVersioned)
 _DLMT_p = ctypes.POINTER(dlpack.DLManagedTensor)
 def dl_tensor(capsule):
@@ -255,7 +257,7 @@ def as_nocopy(a, *, xp, shape=None, dtype=None, strides_bytes=None):
             if strides_bytes is None and dlt.strides is not None:
                 raise ValueError("The passed array is not dense row-major. Specify both shape and strides.")
             dlt.shape = (ctypes.c_long * len(shape))(*shape)
-        if strides is not None:
+        if strides_bytes is not None:
             dlt.strides = (ctypes.c_long * len(strides))(*[stride//dtype_new.size for stride in strides_bytes])
         return xp.from_dlpack(forward_dlpack(dlpack, (dlt.device.device_type, dlt.device.device_id), **dlpack_kwparams))
 
