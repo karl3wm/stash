@@ -45,7 +45,7 @@ class NDBigInt:
     def T(self):
         xp = self.xp
         return NDBigInt(
-            xp.permute_dims(self, [1,0,2]),
+            xp.permute_dims(self._data, [1,0,2]),
             copy=False,
             _xp=xp,
             _limbs=self._limbs
@@ -282,10 +282,8 @@ class NDBigInt:
 
         #x_lo = xp.astype(x[...,:xlimbs], xp.uint32, copy=False) # needs astype_nocopy as by default a copy is forced if the datatype differs
         #y_lo = xp.astype(y[...,:ylimbs], xp.uint32, copy=False) # needs astype_nocopy as by default a copy is forced if the datatype differs
-        x_lo = x[...,:xlimbs] & 0x00000000ffffffff
-        y_lo = y[...,:ylimbs] & 0x00000000ffffffff
-        x_hi = x[...,:xlimbs] >> 32
-        y_hi = y[...,:ylimbs] >> 32
+        x_lo, y_lo = xp.broadcast_arrays(x[...,:xlimbs] & 0x00000000ffffffff, y[...,:ylimbs] & 0x00000000ffffffff)
+        x_hi, y_hi = xp.broadcast_arrays(x[...,:xlimbs] >> 32, y[...,:ylimbs] >> 32)
         # low halflimb products are in-place.
         prod[..., 0, 0, :xlimbs, :ylimbs] = x_lo[...,None] @ y_lo[...,None,:]
         # low*high halflimb products are shifted up by a halflimb
@@ -340,11 +338,13 @@ class NDBigInt:
         y._alloc(x._limbs + y._limbs)
         x._alloc(x._limbs + y._limbs)
 
+        assert x._data.shape[-2] == 1 or x._data.shape[-2] == y._data.shape[-3] or y._data.shape[-3] == 1
+
         # (...,M,K) @ (...,K,N) = (...,M,N)
         # instead we do
         # sum((...,M,[],K) * (...,[],N,K), -1) = (...,M,N).
         return (
-                x[...,:,None,:] * y.mT[...,None,:,:] # rows * cols
+                x[...,:,None] * y.mT[...,None,:] # rows * cols
             ).sum(axis=-1)[*out_slice]
 
     def __isub__(x, y):
@@ -488,4 +488,4 @@ if __name__ == '__main__':
     assert int(sum2[0,0]) == int(sum1[0,0])
     assert xp.all(sum1 == sum2)
 
-    ars[0] @ ars[1]
+    ars[0] @ NDBigInt(ars[1].mT, copy=True)
