@@ -9,14 +9,18 @@ def inject_docs(xp):
             pass
         except TypeError:
             pass
-    array = type(xp.asarray([]))
-    for attrn, docattr in docs.array.__dict__.items():
-        try:
-            getattr(array, attrn).__doc__ = docattr.__doc__
-        except AttributeError:
-            pass
-        except TypeError:
-            pass
+    try:
+        array = type(xp.asarray([]))
+    except AttributeError:
+        pass
+    else:
+        for attrn, docattr in docs.array.__dict__.items():
+            try:
+                getattr(array, attrn).__doc__ = docattr.__doc__
+            except AttributeError:
+                pass
+            except TypeError:
+                pass
 
 for xp_modname in [
     'array_api_strict',
